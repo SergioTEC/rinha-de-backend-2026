@@ -1,3 +1,6 @@
+# AGENTS.md - instruções locais para agents
+AGENTS.md
+
 # Rust build artifacts
 target/
 Cargo.lock
