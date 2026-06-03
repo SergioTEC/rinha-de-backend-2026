@@ -1,5 +1,5 @@
 // Main entry point for Rinha API with Unix socket support (SCM_RIGHTS).
-// Optimized: thread pool, zero-allocation hot path, mlock on index.
+// Top-3 style: persistent LB connections, socket created BEFORE dataset load.
 
 mod json_parser;
 mod vectorize;
@@ -12,19 +12,20 @@ use std::env;
 use std::fs;
 use std::net::TcpListener;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 use std::thread;
 
 use json_parser::{init_mcc_risk_table, parse_transaction};
 use vectorize::{vectorize, quantize};
 use dataset::Dataset;
 use fastpath::{fast_path, FastResult};
-use ivf::{IVFIndex, IVF_NPROBE_EASY, IVF_NPROBE_HARD};
+use ivf::IVFIndex;
 use http::{FraudResult, handle_connection};
 
-fn recv_fd_with_rights(unix_stream: &mut UnixStream) -> std::io::Result<RawFd> {
-    let raw_fd = unix_stream.as_raw_fd();
+// =====================================================================
+// RAW FD RECV (lightweight, for persistent LB connections)
+// =====================================================================
+fn recv_fd_raw(fd: RawFd) -> std::io::Result<RawFd> {
     let fd_size = std::mem::size_of::<RawFd>();
     let cmsg_size = unsafe { libc::CMSG_SPACE(fd_size as libc::c_uint) } as usize;
     let mut control_buf = vec![0u8; cmsg_size];
@@ -38,10 +39,15 @@ fn recv_fd_with_rights(unix_stream: &mut UnixStream) -> std::io::Result<RawFd> {
     msg.msg_iovlen = 1;
     msg.msg_control = control_buf.as_mut_ptr() as *mut libc::c_void;
     msg.msg_controllen = cmsg_size as _;
-    let result = unsafe { libc::recvmsg(raw_fd, &mut msg, 0) };
+
+    let result = unsafe { libc::recvmsg(fd, &mut msg, 0) };
     if result < 0 {
         return Err(std::io::Error::last_os_error());
     }
+    if result == 0 {
+        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "LB disconnected"));
+    }
+
     unsafe {
         let cmsg = libc::CMSG_FIRSTHDR(&msg);
         if cmsg.is_null() {
@@ -60,10 +66,110 @@ struct AppState {
     ivf: Arc<IVFIndex>,
 }
 
+// =====================================================================
+// UDS: Create listener socket (SOCK_SEQPACKET) BEFORE loading dataset
+// =====================================================================
+fn create_uds_listener(path: &str) -> i32 {
+    let _ = fs::remove_file(path);
+
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0) };
+    if fd < 0 {
+        panic!("Failed to create SOCK_SEQPACKET socket: {}", std::io::Error::last_os_error());
+    }
+
+    // Increase send buffer (like lucasmontano)
+    let sndbuf: i32 = 256 * 1024;
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            &sndbuf as *const _ as *const libc::c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
+
+    use std::os::unix::ffi::OsStrExt;
+    let path_bytes = std::path::Path::new(path).as_os_str().as_bytes();
+    let mut addr: [libc::c_char; 108] = unsafe { std::mem::zeroed() };
+    let len = std::cmp::min(path_bytes.len(), addr.len() - 1);
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            path_bytes.as_ptr() as *const libc::c_char,
+            addr.as_mut_ptr(),
+            len,
+        );
+    }
+
+    let sun = libc::sockaddr_un {
+        sun_family: libc::AF_UNIX as u16,
+        sun_path: unsafe { std::mem::transmute(addr) },
+    };
+    let sun_len = std::mem::size_of::<libc::sockaddr_un>() as u32;
+
+    let res = unsafe { libc::bind(fd, &sun as *const _ as *const libc::sockaddr, sun_len) };
+    if res < 0 {
+        panic!("Failed to bind UDS {}: {}", path, std::io::Error::last_os_error());
+    }
+
+    let res = unsafe { libc::listen(fd, 64) };
+    if res < 0 {
+        panic!("Failed to listen UDS: {}", std::io::Error::last_os_error());
+    }
+
+    // Set permissions so LB can connect
+    let path_cstr = std::ffi::CString::new(path).unwrap();
+    unsafe { libc::chmod(path_cstr.as_ptr(), 0o777); }
+
+    fd
+}
+
+fn accept_uds_conn(listener_fd: i32) -> Option<i32> {
+    let mut client_addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let mut client_len = std::mem::size_of::<libc::sockaddr_un>() as u32;
+    let client_fd = unsafe {
+        libc::accept4(
+            listener_fd,
+            &mut client_addr as *mut _ as *mut libc::sockaddr,
+            &mut client_len,
+            libc::SOCK_CLOEXEC,
+        )
+    };
+    if client_fd < 0 {
+        return None;
+    }
+    Some(client_fd)
+}
+
 fn main() {
     let mode = env::var("LISTEN_SOCKET").unwrap_or_default();
     println!("[API] Starting...");
 
+    // =====================================================================
+    // STEP 1: Create Unix socket IMMEDIATELY (before loading dataset)
+    // This allows LB to connect even while dataset is loading (~15s)
+    // =====================================================================
+    let uds_listener_fd: Option<i32> = if mode.starts_with("/") {
+        #[cfg(target_os = "linux")]
+        {
+            Some(create_uds_listener(&mode))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            eprintln!("[API] UDS requires Linux; falling back to TCP");
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(fd) = uds_listener_fd {
+        println!("[API] UDS listener created at {} (fd={})", mode, fd);
+    }
+
+    // =====================================================================
+    // STEP 2: Load dataset (~15s in Docker)
+    // =====================================================================
     let mcc_data = fs::read("resources/mcc_risk.json").expect("mcc_risk.json not found");
     init_mcc_risk_table(&mcc_data);
 
@@ -92,158 +198,101 @@ fn main() {
     // Warm-up
     warm_up(&state);
 
-    // Spawn per connection (like top 3 do)
     let state_arc = Arc::clone(&state);
 
-    if mode.starts_with("/") {
-        let _ = fs::remove_file(&mode);
-        
-        #[cfg(target_os = "linux")]
-        {
-            // Linux: raw socket + accept() loop — no UnixListener overhead
-            // Note: use SOCK_STREAM to match LB's UnixStream::connect (Rust default)
-            let fd = unsafe {
-                libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0)
-            };
-            if fd < 0 {
-                panic!("Failed to create SOCK_SEQPACKET socket");
-            }
-            
-            use std::os::unix::ffi::OsStrExt;
-            let path_bytes = std::path::Path::new(&mode).as_os_str().as_bytes();
-            let mut addr: [libc::c_char; 108] = unsafe { std::mem::zeroed() };
-            // Filesystem path (not abstract namespace) - creates actual file in /tmp/sockets
-            let len = std::cmp::min(path_bytes.len(), addr.len() - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    path_bytes.as_ptr() as *const libc::c_char,
-                    addr.as_mut_ptr(),
-                    len,
-                );
-            }
-            let sun = libc::sockaddr_un {
-                sun_family: libc::AF_UNIX as u16,
-                sun_path: unsafe { std::mem::transmute(addr) },
-            };
-            let sun_len = std::mem::size_of::<libc::sockaddr_un>() as u32;
-            
-            let res = unsafe {
-                libc::bind(fd, &sun as *const _ as *const libc::sockaddr, sun_len)
-            };
-            if res < 0 {
-                panic!("Failed to bind SOCK_SEQPACKET: {}", std::io::Error::last_os_error());
-            }
-            
-            let res = unsafe { libc::listen(fd, 64) };
-            if res < 0 {
-                panic!("Failed to listen: {}", std::io::Error::last_os_error());
-            }
-            
-            println!("[API] Listening on Unix socket {} (SOCK_SEQPACKET)", mode);
-            println!("[API] Ready");
+    // =====================================================================
+    // STEP 3: Accept LB connections (persistent)
+    // Each LB connection spawns ONE thread that recvmsg()'s in a loop
+    // =====================================================================
+    if let Some(fd) = uds_listener_fd {
+        println!("[API] Listening on Unix socket {} (SOCK_SEQPACKET)", mode);
+        println!("[API] Ready");
 
-            // Raw accept loop — NO UnixListener, NO extra socket setup
-            loop {
-                let mut client_addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-                let mut client_len = std::mem::size_of::<libc::sockaddr_un>() as u32;
-                let client_fd = unsafe {
-                    libc::accept(fd, &mut client_addr as *mut _ as *mut libc::sockaddr, &mut client_len)
-                };
-                if client_fd < 0 {
+        loop {
+            let uds_fd = match accept_uds_conn(fd) {
+                Some(fd) => fd,
+                None => {
+                    std::thread::sleep(std::time::Duration::from_micros(10));
                     continue;
                 }
+            };
 
-                // Receive client TCP FD via SCM_RIGHTS
-                let cmsg_size = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as libc::c_uint) } as usize;
+            println!("[API] LB connected (uds_fd={})", uds_fd);
+
+            let state_clone = Arc::clone(&state_arc);
+            thread::spawn(move || {
+                // Pre-allocate recv buffers (avoid allocation per request)
+                let fd_size = std::mem::size_of::<RawFd>();
+                let cmsg_size = unsafe { libc::CMSG_SPACE(fd_size as libc::c_uint) } as usize;
                 let mut control_buf = vec![0u8; cmsg_size];
                 let mut recv_buf = [0u8; 1];
                 let mut iov = libc::iovec {
                     iov_base: recv_buf.as_mut_ptr() as *mut libc::c_void,
                     iov_len: recv_buf.len(),
                 };
-                let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-                msg.msg_iov = &mut iov;
-                msg.msg_iovlen = 1;
-                msg.msg_control = control_buf.as_mut_ptr() as *mut libc::c_void;
-                msg.msg_controllen = cmsg_size as _;
-                
-                let res = unsafe { libc::recvmsg(client_fd, &mut msg, 0) };
-                if res < 0 {
-                    unsafe { libc::close(client_fd); }
-                    continue;
-                }
-                
-                let tcp_fd = unsafe {
-                    let cmsg = libc::CMSG_FIRSTHDR(&msg);
-                    if cmsg.is_null() || (*cmsg).cmsg_level != libc::SOL_SOCKET || (*cmsg).cmsg_type != libc::SCM_RIGHTS {
-                        libc::close(client_fd);
-                        -1
-                    } else {
-                        let data_ptr = libc::CMSG_DATA(cmsg) as *mut RawFd;
-                        let fd = *data_ptr;
-                        libc::close(client_fd);  // close the Unix socket, keep the TCP FD
-                        fd
-                    }
-                };
-                
-                if tcp_fd < 0 {
-                    continue;
-                }
-                
-                // Use the TCP FD directly — LB already accepted the connection!
-                let state_clone = Arc::clone(&state_arc);
-                thread::spawn(move || {
-                    unsafe {
-                        let tcp_stream = std::net::TcpStream::from_raw_fd(tcp_fd);
-                        handle_connection(tcp_stream, |body| {
-                            handle_fraud_score(body, &state_clone)
-                        });
-                    }
-                });
-            }
-        }
-        
-        #[cfg(not(target_os = "linux"))]
-        {
-            // macOS: Unix sockets not supported in this build, use TCP
-            eprintln!("[API] Unix sockets not supported on macOS, falling back to TCP");
-            let port = env::var("PORT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(9999u16);
-            let addr = format!("0.0.0.0:{}", port);
-            let listener = TcpListener::bind(&addr).expect("Failed to bind TCP");
-            
-            listener.set_nonblocking(false).expect("set_nonblocking");
-            
-            println!("[API] Listening on TCP {}", addr);
-            println!("[API] Ready");
 
-            for stream in listener.incoming() {
-                match stream {
-                    Ok(stream) => {
-                        let _ = stream.set_nodelay(true);
-                        let state_clone = Arc::clone(&state_arc);
-                        thread::spawn(move || {
-                            handle_connection(stream, |body| {
-                                handle_fraud_score(body, &state_clone)
-                            });
-                        });
+                loop {
+                    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+                    msg.msg_iov = &mut iov;
+                    msg.msg_iovlen = 1;
+                    msg.msg_control = control_buf.as_mut_ptr() as *mut libc::c_void;
+                    msg.msg_controllen = cmsg_size as _;
+
+                    let res = unsafe { libc::recvmsg(uds_fd, &mut msg, 0) };
+                    if res <= 0 {
+                        if res < 0 {
+                            let err = std::io::Error::last_os_error();
+                            if err.kind() != std::io::ErrorKind::WouldBlock {
+                                eprintln!("[API] recvmsg error: {}", err);
+                            }
+                        }
+                        break; // LB disconnected
                     }
-                    Err(e) => eprintln!("Accept error: {}", e),
+
+                    let tcp_fd = unsafe {
+                        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+                        if cmsg.is_null()
+                            || (*cmsg).cmsg_level != libc::SOL_SOCKET
+                            || (*cmsg).cmsg_type != libc::SCM_RIGHTS
+                        {
+                            -1
+                        } else {
+                            let data_ptr = libc::CMSG_DATA(cmsg) as *mut RawFd;
+                            *data_ptr
+                        }
+                    };
+
+                    if tcp_fd < 0 {
+                        continue;
+                    }
+
+                    // Spawn thread per client (spawn-per-connection model)
+                    let state_spawn = Arc::clone(&state_clone);
+                    thread::spawn(move || {
+                        unsafe {
+                            let tcp_stream = std::net::TcpStream::from_raw_fd(tcp_fd);
+                            let _ = tcp_stream.set_nodelay(true);
+                            handle_connection(tcp_stream, |body| {
+                                handle_fraud_score(body, &state_spawn)
+                            });
+                        }
+                    });
                 }
-            }
+
+                unsafe { libc::close(uds_fd); }
+                println!("[API] LB disconnected (uds_fd={})", uds_fd);
+                // The OS will clean up threads naturally when the LB reconnects
+            });
         }
     } else {
+        // TCP fallback (macOS or no LISTEN_SOCKET)
         let port = env::var("PORT")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(9999u16);
         let addr = format!("0.0.0.0:{}", port);
         let listener = TcpListener::bind(&addr).expect("Failed to bind TCP");
-        
         listener.set_nonblocking(false).expect("set_nonblocking");
-        
         println!("[API] Listening on TCP {}", addr);
         println!("[API] Ready");
 
@@ -268,7 +317,7 @@ fn warm_up(state: &AppState) {
     println!("[API] Warming up...");
     let mut query = [0i16; 14];
     for _ in 0..256 {
-        let fraud_count = state.ivf.search(&state.dataset, &query, 5, ivf::IVF_NPROBE_EASY);
+        let _ = state.ivf.search(&state.dataset, &query, 5, ivf::IVF_NPROBE_EASY);
         query[0] = query[0].wrapping_add(100);
     }
     println!("[API] Warm-up complete");
@@ -279,7 +328,6 @@ fn handle_fraud_score(body: &[u8], state: &AppState) -> FraudResult {
     let mut v = [0.0f32; 14];
     vectorize(&tx, &mut v);
 
-    // Heuristic fastpath (computationaly free)
     match fast_path(&v) {
         FastResult::Legit => return FraudResult::Score(0),
         FastResult::Fraud => return FraudResult::Score(5),
@@ -291,8 +339,6 @@ fn handle_fraud_score(body: &[u8], state: &AppState) -> FraudResult {
         qv[d] = quantize(v[d]);
     }
 
-    // === FULL IVF SEARCH ===
-    // nprobe=1, k=5 for speed (check only closest cell)
     let fraud_count = state.ivf.search(&state.dataset, &qv, 5, 1);
     FraudResult::Score(fraud_count)
 }
