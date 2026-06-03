@@ -2,7 +2,7 @@
 # Builda API + LB em uma única imagem
 # Baseado no padrão do top 1 (dalvorsn)
 
-FROM rust:1.78-slim-bookworm AS builder
+FROM rust:1.82-slim-bookworm AS builder
 
 WORKDIR /app
 

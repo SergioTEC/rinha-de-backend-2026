@@ -88,7 +88,7 @@ fn send_fd(stream: &mut UnixStream, fd: RawFd) -> io::Result<()> {
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
     msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
-    msg.msg_controllen = cmsg_space as libc::socklen_t;
+    msg.msg_controllen = cmsg_space as _;
 
     unsafe {
         let cmsg = libc::CMSG_FIRSTHDR(&msg);
@@ -97,7 +97,7 @@ fn send_fd(stream: &mut UnixStream, fd: RawFd) -> io::Result<()> {
         }
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
         (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-        (*cmsg).cmsg_len = libc::CMSG_LEN(fd_size as libc::c_uint) as u32;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(fd_size as libc::c_uint) as _;
 
         let data_ptr = libc::CMSG_DATA(cmsg) as *mut RawFd;
         *data_ptr = fd;
