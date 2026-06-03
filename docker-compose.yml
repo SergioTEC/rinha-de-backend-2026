@@ -30,7 +30,7 @@ services:
   lb:
     image: ghcr.io/sergiotec/rinha-2026:latest
     container_name: lb
-    command: /app/lb
+    entrypoint: ["/app/lb"]
     environment:
       - LB_PORT=9999
       - LB_BACKENDS=/tmp/sockets/api1.sock,/tmp/sockets/api2.sock
