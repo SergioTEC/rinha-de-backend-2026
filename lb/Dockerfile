@@ -1,0 +1,3 @@
+FROM nginx:alpine
+RUN echo 'worker_processes 1; events { worker_connections 1024; use epoll; multi_accept on; } http { upstream api_backend { server api1:9001; server api2:9002; keepalive 64; } server { listen 9999; access_log off; location / { proxy_pass http://api_backend; proxy_http_version 1.1; proxy_set_header Connection ""; proxy_connect_timeout 2s; proxy_read_timeout 10s; proxy_send_timeout 10s; } } }' > /etc/nginx/nginx.conf
+CMD ["nginx", "-g", "daemon off;"]

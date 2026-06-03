@@ -1,0 +1,12 @@
+[package]
+name = "rinha-lb"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.78"
+
+[dependencies]
+libc = "0.2"
+
+[[bin]]
+name = "lb"
+path = "src/main.rs"

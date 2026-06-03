@@ -1,0 +1,12 @@
+target/
+*.DS_Store
+*.swp
+*.swo
+*~
+.env
+tmp/
+temp/
+
+# Large binary files (generated/optional)
+resources/index.bin
+resources/references.json.gz
