@@ -4,6 +4,7 @@ services:
     container_name: api1
     environment:
       - PORT=9001
+      - LISTEN_SOCKET=/tmp/sockets/api1.sock
     volumes:
       - socks:/tmp/sockets
     deploy:
@@ -17,6 +18,7 @@ services:
     container_name: api2
     environment:
       - PORT=9002
+      - LISTEN_SOCKET=/tmp/sockets/api2.sock
     volumes:
       - socks:/tmp/sockets
     deploy:
