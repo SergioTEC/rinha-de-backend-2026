@@ -5,17 +5,21 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let port = args.get(1)
+    let port = env::var("LB_PORT")
+        .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(9999u16);
 
-    let backend_sockets = [
-        "/tmp/sockets/api1.sock",
-        "/tmp/sockets/api2.sock",
-    ];
+    let backends_env = env::var("LB_BACKENDS")
+        .unwrap_or_else(|_| "/tmp/sockets/api1.sock,/tmp/sockets/api2.sock".to_string());
+    
+    let backend_sockets: Vec<String> = backends_env
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
 
     println!("[LB] Starting on port {}", port);
+    println!("[LB] Backends: {:?}", backend_sockets);
 
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
         .expect("Failed to bind TCP");
@@ -51,7 +55,7 @@ fn main() {
                         if let Err(e) = send_fd(unix, fd) {
                             eprintln!("[LB] send_fd error: {}", e);
                             // Try to reconnect
-                            if let Ok(new) = UnixStream::connect(backend_sockets[idx]) {
+                            if let Ok(new) = UnixStream::connect(&backend_sockets[idx]) {
                                 backends[idx] = Some(new);
                             }
                             continue;

@@ -10,3 +10,6 @@ temp/
 # Large binary files (generated/optional)
 resources/index.bin
 resources/references.json.gz
+
+# Local-only files
+AGENTS.md
