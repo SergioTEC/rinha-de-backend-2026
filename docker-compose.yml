@@ -1,6 +1,6 @@
 services:
   api1:
-    image: ghcr.io/SergioTEC/rinha-2026:latest
+    image: ghcr.io/sergiotec/rinha-2026:latest
     container_name: api1
     environment:
       - PORT=9001
@@ -14,7 +14,7 @@ services:
           memory: 160M
 
   api2:
-    image: ghcr.io/SergioTEC/rinha-2026:latest
+    image: ghcr.io/sergiotec/rinha-2026:latest
     container_name: api2
     environment:
       - PORT=9002
@@ -28,7 +28,7 @@ services:
           memory: 160M
 
   lb:
-    image: ghcr.io/SergioTEC/rinha-2026:latest
+    image: ghcr.io/sergiotec/rinha-2026:latest
     container_name: lb
     command: /app/lb
     environment:
