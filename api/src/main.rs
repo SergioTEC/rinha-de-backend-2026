@@ -112,12 +112,12 @@ fn main() {
             use std::os::unix::ffi::OsStrExt;
             let path_bytes = std::path::Path::new(&mode).as_os_str().as_bytes();
             let mut addr: [libc::c_char; 108] = unsafe { std::mem::zeroed() };
-            addr[0] = 0;
+            // Filesystem path (not abstract namespace) - creates actual file in /tmp/sockets
             let len = std::cmp::min(path_bytes.len(), addr.len() - 1);
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     path_bytes.as_ptr() as *const libc::c_char,
-                    addr.as_mut_ptr().offset(1),
+                    addr.as_mut_ptr(),
                     len,
                 );
             }

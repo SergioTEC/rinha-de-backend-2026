@@ -1,10 +1,12 @@
 services:
   lb:
-    image: nginx:alpine
+    image: ghcr.io/sergiotec/rinha-2026:latest
+    command: ["/app/lb"]
     ports:
       - "9999:9999"
-    command: >
-      sh -c "echo 'events { worker_connections 4096; use epoll; multi_accept on; } http { upstream api_backend { server api1:9001; server api2:9002; keepalive 64; keepalive_requests 1000; keepalive_timeout 60s; } server { listen 9999; access_log off; location / { proxy_pass http://api_backend; proxy_http_version 1.1; proxy_set_header Connection \"\"; proxy_connect_timeout 2s; proxy_read_timeout 10s; proxy_send_timeout 10s; proxy_buffering off; } } }' > /tmp/nginx.conf && nginx -c /tmp/nginx.conf -g 'daemon off;'"
+    environment:
+      - LB_PORT=9999
+      - LB_BACKENDS=/tmp/sockets/api1.sock,/tmp/sockets/api2.sock
     networks:
       - rinha
     depends_on:
@@ -15,11 +17,14 @@ services:
         limits:
           cpus: '0.10'
           memory: '10MB'
+    volumes:
+      - sockets:/tmp/sockets
 
   api1:
     image: ghcr.io/sergiotec/rinha-2026:latest
+    command: ["/app/api"]
     environment:
-      - PORT=9001
+      - LISTEN_SOCKET=/tmp/sockets/api1.sock
     networks:
       - rinha
     deploy:
@@ -27,11 +32,14 @@ services:
         limits:
           cpus: '0.40'
           memory: '165MB'
+    volumes:
+      - sockets:/tmp/sockets
 
   api2:
     image: ghcr.io/sergiotec/rinha-2026:latest
+    command: ["/app/api"]
     environment:
-      - PORT=9002
+      - LISTEN_SOCKET=/tmp/sockets/api2.sock
     networks:
       - rinha
     deploy:
@@ -39,6 +47,11 @@ services:
         limits:
           cpus: '0.40'
           memory: '165MB'
+    volumes:
+      - sockets:/tmp/sockets
+
+volumes:
+  sockets:
 
 networks:
   rinha:
