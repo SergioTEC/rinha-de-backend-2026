@@ -1,17 +1,23 @@
+# Rust build artifacts
 target/
-*.DS_Store
+Cargo.lock
+
+# Test results
+test/results.json
+test/*.json
+
+# Runtime
+sockets/
+
+# IDE
+.vscode/
+.idea/
 *.swp
 *.swo
-*~
-.env
-tmp/
-temp/
 
-# Large binary files (generated/optional)
-resources/index.bin
-resources/index_v2.bin
-resources/references.json.gz
+# OS
+.DS_Store
+Thumbs.db
 
-# Local-only files
-AGENTS.md
-test/
+# Logs
+*.log

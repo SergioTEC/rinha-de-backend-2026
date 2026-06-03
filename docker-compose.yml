@@ -22,6 +22,7 @@ services:
 
   api1:
     image: ghcr.io/sergiotec/rinha-2026:latest
+    command: ["/app/api"]
     environment:
       - LISTEN_SOCKET=/tmp/sockets/api1.sock
     networks:
@@ -36,6 +37,7 @@ services:
 
   api2:
     image: ghcr.io/sergiotec/rinha-2026:latest
+    command: ["/app/api"]
     environment:
       - LISTEN_SOCKET=/tmp/sockets/api2.sock
     networks:
