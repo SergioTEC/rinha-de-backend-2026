@@ -10,15 +10,20 @@ services:
     networks:
       - rinha
     depends_on:
-      api1:
-        condition: service_healthy
-      api2:
-        condition: service_healthy
+      - api1
+      - api2
     deploy:
       resources:
         limits:
           cpus: '0.10'
           memory: '10MB'
+    cpuset: "2,3"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    logging:
+      driver: "none"
     volumes:
       - sockets:/tmp/sockets
 
@@ -34,14 +39,18 @@ services:
         limits:
           cpus: '0.40'
           memory: '165MB'
+    cpuset: "0"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+      memlock:
+        soft: -1
+        hard: -1
+    logging:
+      driver: "none"
     volumes:
       - sockets:/tmp/sockets
-    healthcheck:
-      test: ["CMD", "bash", "-c", "test -S /tmp/sockets/api1.sock"]
-      interval: 2s
-      timeout: 1s
-      retries: 30
-      start_period: 20s
 
   api2:
     image: ghcr.io/sergiotec/rinha-2026:latest
@@ -55,17 +64,26 @@ services:
         limits:
           cpus: '0.40'
           memory: '165MB'
+    cpuset: "1"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+      memlock:
+        soft: -1
+        hard: -1
+    logging:
+      driver: "none"
     volumes:
       - sockets:/tmp/sockets
-    healthcheck:
-      test: ["CMD", "bash", "-c", "test -S /tmp/sockets/api2.sock"]
-      interval: 2s
-      timeout: 1s
-      retries: 30
-      start_period: 20s
 
 volumes:
   sockets:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=4m,uid=0,gid=0,mode=0777"
 
 networks:
   rinha:
