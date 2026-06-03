@@ -1,47 +1,54 @@
 services:
+  api1:
+    image: ghcr.io/SergioTEC/rinha-2026:latest
+    container_name: api1
+    environment:
+      - PORT=9001
+    volumes:
+      - socks:/tmp/sockets
+    deploy:
+      resources:
+        limits:
+          cpus: '0.45'
+          memory: 160M
+
+  api2:
+    image: ghcr.io/SergioTEC/rinha-2026:latest
+    container_name: api2
+    environment:
+      - PORT=9002
+    volumes:
+      - socks:/tmp/sockets
+    deploy:
+      resources:
+        limits:
+          cpus: '0.45'
+          memory: 160M
+
   lb:
-    image: nginx:alpine
+    image: ghcr.io/SergioTEC/rinha-2026:latest
+    container_name: lb
+    command: /app/lb
+    environment:
+      - LB_PORT=9999
+      - LB_BACKENDS=/tmp/sockets/api1.sock,/tmp/sockets/api2.sock
     ports:
       - "9999:9999"
-    command: >
-      sh -c "echo 'events { worker_connections 4096; use epoll; multi_accept on; } http { upstream api_backend { server api1:9001; server api2:9002; keepalive 64; keepalive_requests 1000; keepalive_timeout 60s; } server { listen 9999; access_log off; location / { proxy_pass http://api_backend; proxy_http_version 1.1; proxy_set_header Connection \"\"; proxy_connect_timeout 2s; proxy_read_timeout 10s; proxy_send_timeout 10s; proxy_buffering off; } } }' > /tmp/nginx.conf && nginx -c /tmp/nginx.conf -g 'daemon off;'"
-    networks:
-      - rinha
+    volumes:
+      - socks:/tmp/sockets
     depends_on:
       - api1
       - api2
     deploy:
       resources:
         limits:
-          cpus: "0.10"
-          memory: "10MB"
+          cpus: '0.10'
+          memory: 20M
 
-  api1:
-    image: rinha-api:latest
-    build: ./api
-    environment:
-      - PORT=9001
-    networks:
-      - rinha
-    deploy:
-      resources:
-        limits:
-          cpus: "0.40"
-          memory: "165MB"
-
-  api2:
-    image: rinha-api:latest
-    build: ./api
-    environment:
-      - PORT=9002
-    networks:
-      - rinha
-    deploy:
-      resources:
-        limits:
-          cpus: "0.40"
-          memory: "165MB"
-
-networks:
-  rinha:
-    driver: bridge
+volumes:
+  socks:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=10m"
