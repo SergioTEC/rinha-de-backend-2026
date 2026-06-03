@@ -13,39 +13,66 @@ fn main() {
     let backends_env = env::var("LB_BACKENDS")
         .unwrap_or_else(|_| "/tmp/sockets/api1.sock,/tmp/sockets/api2.sock".to_string());
 
-    let backend_sockets: Vec<String> = backends_env
+    let backend_paths: Vec<String> = backends_env
         .split(',')
         .map(|s| s.trim().to_string())
         .collect();
 
     println!("[LB] Starting on port {}", port);
-    println!("[LB] Backends: {:?}", backend_sockets);
+    println!("[LB] Backends: {:?}", backend_paths);
 
+    // === BIND TCP NA PORTA 9999 IMEDIATAMENTE ===
+    // Isso garante que o health check do bot encontra a porta aberta
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
         .expect("Failed to bind TCP");
-
-    // Set non-blocking for faster accept
     listener.set_nonblocking(true).ok();
+    println!("[LB] TCP listener bound on port {}", port);
 
-    let mut backends: Vec<Option<UnixStream>> = Vec::new();
-    for path in &backend_sockets {
-        match connect_with_retry(path, 60, 200) {
-            Ok(stream) => {
-                println!("[LB] Connected to {}", path);
-                backends.push(Some(stream));
-            }
-            Err(e) => {
-                eprintln!("[LB] Failed to connect to {}: {}", path, e);
-                backends.push(None);
-            }
-        }
+    // === CONECTAR NOS BACKENDS EM PARALELO ===
+    // Usar thread separada para não bloquear o accept loop
+    let (backend_tx, backend_rx) = std::sync::mpsc::channel::<Option<UnixStream>>();
+    
+    for path in &backend_paths {
+        let path = path.clone();
+        let tx = backend_tx.clone();
+        std::thread::spawn(move || {
+            let stream = connect_with_retry(&path, 120, 500); // 120 retries, 500ms = 60s max
+            let _ = tx.send(stream);
+        });
+    }
+
+    let mut backends: Vec<Option<UnixStream>> = Vec::with_capacity(backend_paths.len());
+    for _ in 0..backend_paths.len() {
+        backends.push(None);
     }
 
     let mut next_backend = 0usize;
+    let mut connected_count = 0;
 
+    println!("[LB] Ready (accepting connections while backends warm up)");
+
+    // === ACCEPT LOOP PRINCIPAL ===
+    // Aceita conexões TCP imediatamente, repassa quando backends estiverem prontos
     for stream in listener.incoming() {
+        // Verificar se novos backends conectaram (non-blocking)
+        while let Ok(Some(stream)) = backend_rx.try_recv() {
+            if let Some(idx) = backends.iter().position(|b| b.is_none()) {
+                backends[idx] = Some(stream);
+                connected_count += 1;
+                println!("[LB] Backend {}/{} connected", connected_count, backends.len());
+            }
+        }
+
         match stream {
             Ok(client) => {
+                // Se nenhum backend pronto, droppar silenciosamente
+                // O health check do bot vai retry automaticamente
+                if connected_count == 0 {
+                    drop(client);
+                    continue;
+                }
+
+                // Round-robin entre backends disponíveis
                 let mut attempts = 0;
                 let mut sent = false;
                 while attempts < backends.len() {
@@ -56,25 +83,9 @@ fn main() {
                     if let Some(ref mut unix) = backends[idx] {
                         let fd = client.as_raw_fd();
                         if let Err(e) = send_fd(unix, fd) {
-                            eprintln!("[LB] send_fd error: {}, reconnecting...", e);
-                            // Reconnect
-                            match connect_with_retry(&backend_sockets[idx], 5, 100) {
-                                Ok(new_stream) => {
-                                    backends[idx] = Some(new_stream);
-                                    // Retry send with new connection
-                                    if let Some(ref mut unix2) = backends[idx] {
-                                        if let Err(e2) = send_fd(unix2, fd) {
-                                            eprintln!("[LB] Retry send_fd failed: {}", e2);
-                                        } else {
-                                            sent = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                                Err(e2) => {
-                                    eprintln!("[LB] Reconnect failed: {}", e2);
-                                }
-                            }
+                            // Backend morreu, marcar como offline
+                            backends[idx] = None;
+                            connected_count = backends.iter().filter(|b| b.is_some()).count();
                             continue;
                         }
                         sent = true;
@@ -83,13 +94,12 @@ fn main() {
                 }
 
                 if !sent {
-                    // Drop client if couldn't send to any backend
                     drop(client);
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                // No connections available, brief sleep to avoid busy loop
-                std::thread::sleep(std::time::Duration::from_micros(10));
+                // No connections available, brief sleep
+                std::thread::sleep(std::time::Duration::from_micros(100));
             }
             Err(e) => {
                 eprintln!("[LB] Accept error: {}", e);
@@ -98,18 +108,26 @@ fn main() {
     }
 }
 
-fn connect_with_retry(path: &str, max_retries: usize, delay_ms: u64) -> io::Result<UnixStream> {
+fn connect_with_retry(path: &str, max_retries: usize, delay_ms: u64) -> Option<UnixStream> {
     for attempt in 0..max_retries {
         match UnixStream::connect(path) {
-            Ok(stream) => return Ok(stream),
+            Ok(stream) => {
+                println!("[LB] Connected to {} (attempt {})", path, attempt + 1);
+                return Some(stream);
+            }
             Err(e) if attempt < max_retries - 1 => {
-                eprintln!("[LB] Retry {}/{} connecting to {}: {}", attempt + 1, max_retries, path, e);
+                if attempt % 10 == 0 {
+                    println!("[LB] Retry {}/{} connecting to {}: {}", attempt + 1, max_retries, path, e);
+                }
                 std::thread::sleep(std::time::Duration::from_millis(delay_ms));
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                eprintln!("[LB] Failed to connect to {}: {}", path, e);
+                return None;
+            }
         }
     }
-    Err(io::Error::new(io::ErrorKind::NotConnected, "Max retries exceeded"))
+    None
 }
 
 fn send_fd(stream: &mut UnixStream, fd: RawFd) -> io::Result<()> {

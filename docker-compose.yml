@@ -10,8 +10,10 @@ services:
     networks:
       - rinha
     depends_on:
-      - api1
-      - api2
+      api1:
+        condition: service_healthy
+      api2:
+        condition: service_healthy
     deploy:
       resources:
         limits:
@@ -34,6 +36,12 @@ services:
           memory: '165MB'
     volumes:
       - sockets:/tmp/sockets
+    healthcheck:
+      test: ["CMD", "bash", "-c", "test -S /tmp/sockets/api1.sock"]
+      interval: 2s
+      timeout: 1s
+      retries: 30
+      start_period: 20s
 
   api2:
     image: ghcr.io/sergiotec/rinha-2026:latest
@@ -49,6 +57,12 @@ services:
           memory: '165MB'
     volumes:
       - sockets:/tmp/sockets
+    healthcheck:
+      test: ["CMD", "bash", "-c", "test -S /tmp/sockets/api2.sock"]
+      interval: 2s
+      timeout: 1s
+      retries: 30
+      start_period: 20s
 
 volumes:
   sockets:
