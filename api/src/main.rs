@@ -78,11 +78,9 @@ fn main() {
     // mlock to prevent swapping (Linux only, ignored on Mac)
     #[cfg(target_os = "linux")]
     unsafe {
-        for d in 0..ds.dims.len() {
-            let ptr = ds.dims[d].as_ptr() as *const libc::c_void;
-            let len = ds.dims[d].len() * 2;
-            libc::mlock(ptr, len);
-        }
+        let ptr = ds.dims.as_ptr() as *const libc::c_void;
+        let len = ds.dims.len() * 2;
+        libc::mlock(ptr, len);
         println!("[API] mlock applied");
     }
 
@@ -94,52 +92,146 @@ fn main() {
     // Warm-up
     warm_up(&state);
 
-    // Thread pool: 1 worker for minimal memory (Rinha has 1 CPU total)
-    let num_workers = 1;
-    let (tx, rx) = mpsc::channel();
-    let rx = Arc::new(std::sync::Mutex::new(rx));
-    
-    for _ in 0..num_workers {
-        let rx_clone = Arc::clone(&rx);
-        let state_clone = Arc::clone(&state);
-        thread::spawn(move || {
-            loop {
-                let stream_result = {
-                    let rx = rx_clone.lock().unwrap();
-                    rx.recv()
-                };
-                match stream_result {
-                    Ok(stream) => {
-                        handle_connection(stream, |body| {
-                            handle_fraud_score(body, &state_clone)
-                        });
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-    }
+    // Spawn per connection (like top 3 do)
+    let state_arc = Arc::clone(&state);
 
     if mode.starts_with("/") {
         let _ = fs::remove_file(&mode);
-        let listener = UnixListener::bind(&mode).expect("Failed to bind Unix socket");
-        println!("[API] Listening on Unix socket {}", mode);
-        println!("[API] Ready");
+        
+        #[cfg(target_os = "linux")]
+        {
+            // Linux: raw socket + accept() loop — no UnixListener overhead
+            // Note: use SOCK_STREAM to match LB's UnixStream::connect (Rust default)
+            let fd = unsafe {
+                libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0)
+            };
+            if fd < 0 {
+                panic!("Failed to create SOCK_SEQPACKET socket");
+            }
+            
+            use std::os::unix::ffi::OsStrExt;
+            let path_bytes = std::path::Path::new(&mode).as_os_str().as_bytes();
+            let mut addr: [libc::c_char; 108] = unsafe { std::mem::zeroed() };
+            addr[0] = 0;
+            let len = std::cmp::min(path_bytes.len(), addr.len() - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    path_bytes.as_ptr() as *const libc::c_char,
+                    addr.as_mut_ptr().offset(1),
+                    len,
+                );
+            }
+            let sun = libc::sockaddr_un {
+                sun_family: libc::AF_UNIX as u16,
+                sun_path: unsafe { std::mem::transmute(addr) },
+            };
+            let sun_len = std::mem::size_of::<libc::sockaddr_un>() as u32;
+            
+            let res = unsafe {
+                libc::bind(fd, &sun as *const _ as *const libc::sockaddr, sun_len)
+            };
+            if res < 0 {
+                panic!("Failed to bind SOCK_SEQPACKET: {}", std::io::Error::last_os_error());
+            }
+            
+            let res = unsafe { libc::listen(fd, 64) };
+            if res < 0 {
+                panic!("Failed to listen: {}", std::io::Error::last_os_error());
+            }
+            
+            println!("[API] Listening on Unix socket {} (SOCK_SEQPACKET)", mode);
+            println!("[API] Ready");
 
-        for stream in listener.incoming() {
-            match stream {
-                Ok(mut unix_stream) => {
-                    match recv_fd_with_rights(&mut unix_stream) {
-                        Ok(client_fd) => {
-                            unsafe {
-                                let tcp_stream = std::net::TcpStream::from_raw_fd(client_fd);
-                                let _ = tx.send(tcp_stream);
-                            }
-                        }
-                        Err(e) => eprintln!("SCM_RIGHTS recv error: {}", e),
-                    }
+            // Raw accept loop — NO UnixListener, NO extra socket setup
+            loop {
+                let mut client_addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+                let mut client_len = std::mem::size_of::<libc::sockaddr_un>() as u32;
+                let client_fd = unsafe {
+                    libc::accept(fd, &mut client_addr as *mut _ as *mut libc::sockaddr, &mut client_len)
+                };
+                if client_fd < 0 {
+                    continue;
                 }
-                Err(e) => eprintln!("Accept error: {}", e),
+
+                // Receive client TCP FD via SCM_RIGHTS
+                let cmsg_size = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as libc::c_uint) } as usize;
+                let mut control_buf = vec![0u8; cmsg_size];
+                let mut recv_buf = [0u8; 1];
+                let mut iov = libc::iovec {
+                    iov_base: recv_buf.as_mut_ptr() as *mut libc::c_void,
+                    iov_len: recv_buf.len(),
+                };
+                let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+                msg.msg_iov = &mut iov;
+                msg.msg_iovlen = 1;
+                msg.msg_control = control_buf.as_mut_ptr() as *mut libc::c_void;
+                msg.msg_controllen = cmsg_size as _;
+                
+                let res = unsafe { libc::recvmsg(client_fd, &mut msg, 0) };
+                if res < 0 {
+                    unsafe { libc::close(client_fd); }
+                    continue;
+                }
+                
+                let tcp_fd = unsafe {
+                    let cmsg = libc::CMSG_FIRSTHDR(&msg);
+                    if cmsg.is_null() || (*cmsg).cmsg_level != libc::SOL_SOCKET || (*cmsg).cmsg_type != libc::SCM_RIGHTS {
+                        libc::close(client_fd);
+                        -1
+                    } else {
+                        let data_ptr = libc::CMSG_DATA(cmsg) as *mut RawFd;
+                        let fd = *data_ptr;
+                        libc::close(client_fd);  // close the Unix socket, keep the TCP FD
+                        fd
+                    }
+                };
+                
+                if tcp_fd < 0 {
+                    continue;
+                }
+                
+                // Use the TCP FD directly — LB already accepted the connection!
+                let state_clone = Arc::clone(&state_arc);
+                thread::spawn(move || {
+                    unsafe {
+                        let tcp_stream = std::net::TcpStream::from_raw_fd(tcp_fd);
+                        handle_connection(tcp_stream, |body| {
+                            handle_fraud_score(body, &state_clone)
+                        });
+                    }
+                });
+            }
+        }
+        
+        #[cfg(not(target_os = "linux"))]
+        {
+            // macOS: Unix sockets not supported in this build, use TCP
+            eprintln!("[API] Unix sockets not supported on macOS, falling back to TCP");
+            let port = env::var("PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(9999u16);
+            let addr = format!("0.0.0.0:{}", port);
+            let listener = TcpListener::bind(&addr).expect("Failed to bind TCP");
+            
+            listener.set_nonblocking(false).expect("set_nonblocking");
+            
+            println!("[API] Listening on TCP {}", addr);
+            println!("[API] Ready");
+
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(stream) => {
+                        let _ = stream.set_nodelay(true);
+                        let state_clone = Arc::clone(&state_arc);
+                        thread::spawn(move || {
+                            handle_connection(stream, |body| {
+                                handle_fraud_score(body, &state_clone)
+                            });
+                        });
+                    }
+                    Err(e) => eprintln!("Accept error: {}", e),
+                }
             }
         }
     } else {
@@ -150,7 +242,6 @@ fn main() {
         let addr = format!("0.0.0.0:{}", port);
         let listener = TcpListener::bind(&addr).expect("Failed to bind TCP");
         
-        // Enable TCP_NODELAY to reduce latency (disable Nagle algorithm)
         listener.set_nonblocking(false).expect("set_nonblocking");
         
         println!("[API] Listening on TCP {}", addr);
@@ -159,9 +250,13 @@ fn main() {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    // Disable Nagle algorithm for low latency
                     let _ = stream.set_nodelay(true);
-                    let _ = tx.send(stream);
+                    let state_clone = Arc::clone(&state_arc);
+                    thread::spawn(move || {
+                        handle_connection(stream, |body| {
+                            handle_fraud_score(body, &state_clone)
+                        });
+                    });
                 }
                 Err(e) => eprintln!("Accept error: {}", e),
             }
@@ -184,6 +279,7 @@ fn handle_fraud_score(body: &[u8], state: &AppState) -> FraudResult {
     let mut v = [0.0f32; 14];
     vectorize(&tx, &mut v);
 
+    // Heuristic fastpath (computationaly free)
     match fast_path(&v) {
         FastResult::Legit => return FraudResult::Score(0),
         FastResult::Fraud => return FraudResult::Score(5),
@@ -195,12 +291,8 @@ fn handle_fraud_score(body: &[u8], state: &AppState) -> FraudResult {
         qv[d] = quantize(v[d]);
     }
 
-    let nprobe = if v[2] < 0.3 && v[7] < 0.3 && v[11] < 0.5 {
-        IVF_NPROBE_EASY
-    } else {
-        IVF_NPROBE_HARD
-    };
-
-    let fraud_count = state.ivf.search(&state.dataset, &qv, 5, nprobe);
+    // === FULL IVF SEARCH ===
+    // nprobe=1, k=5 for speed (check only closest cell)
+    let fraud_count = state.ivf.search(&state.dataset, &qv, 5, 1);
     FraudResult::Score(fraud_count)
 }

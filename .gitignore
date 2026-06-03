@@ -1,0 +1,17 @@
+target/
+*.DS_Store
+*.swp
+*.swo
+*~
+.env
+tmp/
+temp/
+
+# Large binary files (generated/optional)
+resources/index.bin
+resources/index_v2.bin
+resources/references.json.gz
+
+# Local-only files
+AGENTS.md
+test/
