@@ -1,7 +1,4 @@
-# AGENTS.md - instruções locais para agents
-AGENTS.md
-
-# Rust build artifacts
+# Build artifacts
 target/
 Cargo.lock
 
@@ -18,18 +15,16 @@ sockets/
 *.swp
 *.swo
 
-<<<<<<< HEAD
-# Large binary files (generated/optional)
-resources/index.bin
-resources/references.json.gz
-
-# Local-only files
-AGENTS.md
-=======
 # OS
 .DS_Store
 Thumbs.db
 
 # Logs
 *.log
->>>>>>> submission
+
+# Large binary files
+resources/index.bin
+resources/references.json.gz
+
+# Local-only files
+AGENTS.md
