@@ -31,19 +31,16 @@ jobs:
         run: cargo install --locked cargo-zigbuild
 
       - name: Cross-compile api
-        working-directory: api
-        run: RINHA_SKIP_C_AVX2=1 cargo zigbuild --target x86_64-unknown-linux-gnu --release --bin api
+        run: RINHA_SKIP_C_AVX2=1 cargo zigbuild --target x86_64-unknown-linux-gnu --release --bin api -p rinha-api
 
       - name: Cross-compile lb
-        working-directory: lb
-        run: RINHA_SKIP_C_AVX2=1 cargo zigbuild --target x86_64-unknown-linux-gnu --release --bin lb
+        run: RINHA_SKIP_C_AVX2=1 cargo zigbuild --target x86_64-unknown-linux-gnu --release --bin lb -p rinha-lb
 
-      - name: Copy binaries to root target directory
+      - name: Verify binaries
         run: |
-          mkdir -p target/x86_64-unknown-linux-gnu/release
-          cp api/target/x86_64-unknown-linux-gnu/release/api target/x86_64-unknown-linux-gnu/release/
-          cp lb/target/x86_64-unknown-linux-gnu/release/lb target/x86_64-unknown-linux-gnu/release/
           ls -la target/x86_64-unknown-linux-gnu/release/
+          file target/x86_64-unknown-linux-gnu/release/api
+          file target/x86_64-unknown-linux-gnu/release/lb
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
