@@ -1,6 +1,8 @@
 use std::env;
 use std::io;
 use std::os::unix::io::RawFd;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 fn main() {
     let port = env::var("LB_PORT")
@@ -16,20 +18,8 @@ fn main() {
         .map(|s| s.trim().to_string())
         .collect();
 
-    let mut backends: Vec<RawFd> = Vec::with_capacity(backend_paths.len());
-    for path in &backend_paths {
-        loop {
-            match connect_seqpacket(path) {
-                Ok(fd) => {
-                    backends.push(fd);
-                    break;
-                }
-                Err(_) => {
-                    std::thread::sleep(std::time::Duration::from_millis(25));
-                }
-            }
-        }
-    }
+    let backends = Arc::new(std::sync::Mutex::new(Vec::<RawFd>::new()));
+    let connected_count = Arc::new(AtomicBool::new(false));
 
     let lfd = unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0);
@@ -54,8 +44,27 @@ fn main() {
         fd
     };
 
-    let n = backends.len();
-    let mut rr = 0usize;
+    for path in backend_paths {
+        let backends_clone = Arc::clone(&backends);
+        let connected_clone = Arc::clone(&connected_count);
+        std::thread::spawn(move || {
+            loop {
+                match connect_seqpacket(&path) {
+                    Ok(fd) => {
+                        let mut b = backends_clone.lock().unwrap();
+                        b.push(fd);
+                        if b.len() >= 2 {
+                            connected_clone.store(true, Ordering::Release);
+                        }
+                        break;
+                    }
+                    Err(_) => {
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                    }
+                }
+            }
+        });
+    }
 
     loop {
         let client_fd = unsafe {
@@ -74,24 +83,38 @@ fn main() {
             continue;
         }
 
+        if !connected_count.load(Ordering::Acquire) {
+            unsafe { libc::close(client_fd); }
+            continue;
+        }
+
         unsafe {
             let on: i32 = 1;
             libc::setsockopt(client_fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, &on as *const _ as *const libc::c_void, 4);
             libc::setsockopt(client_fd, libc::IPPROTO_TCP, libc::TCP_QUICKACK, &on as *const _ as *const libc::c_void, 4);
         }
 
-        let first = rr;
-        rr = (rr + 1) % n;
-        let mut sent = false;
-        for attempt in 0..n {
-            let ch = backends[(first + attempt) % n];
-            if send_fd_seqpacket(ch, client_fd).is_ok() {
-                sent = true;
-                break;
-            }
+        let n = backends.lock().unwrap().len();
+        if n == 0 {
+            unsafe { libc::close(client_fd); }
+            continue;
         }
+
+        let rr = unsafe {
+            static mut RR: usize = 0;
+            let idx = RR;
+            RR = (RR + 1) % n;
+            idx
+        };
+
+        let sent = {
+            let b = backends.lock().unwrap();
+            let ch = b[rr];
+            send_fd_seqpacket(ch, client_fd).is_ok()
+        };
         if !sent {
-            let ch = backends[first];
+            let b = backends.lock().unwrap();
+            let ch = b[rr];
             let _ = send_fd_seqpacket(ch, client_fd);
         }
         unsafe { libc::close(client_fd); }

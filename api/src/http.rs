@@ -1,5 +1,4 @@
 use std::io::{Read, Write};
-use std::net::TcpListener;
 
 static SCORE_RESPONSES: [&[u8]; 6] = [
     b"HTTP/1.1 200 OK\r\nContent-Length: 35\r\nConnection: keep-alive\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}",
@@ -13,6 +12,7 @@ static SCORE_RESPONSES: [&[u8]; 6] = [
 pub const HTTP_READY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n";
 pub const HTTP_NOT_FOUND: &[u8] = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n";
 pub const HTTP_BAD_REQUEST: &[u8] = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n";
+pub const HTTP_SERVICE_UNAVAILABLE: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
 #[inline(always)]
 pub fn write_fraud_response(stream: &mut impl Write, fraud_count: usize) {

@@ -10,6 +10,7 @@ use std::fs;
 use std::net::TcpListener;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::thread;
 
 use json_parser::{init_mcc_risk_table, parse_transaction};
@@ -18,42 +19,6 @@ use dataset::Dataset;
 use fastpath::{fast_path, FastResult};
 use ivf::IVFIndex;
 use http::{FraudResult, handle_connection};
-
-fn recv_fd_raw(fd: RawFd) -> std::io::Result<RawFd> {
-    let fd_size = std::mem::size_of::<RawFd>();
-    let cmsg_size = unsafe { libc::CMSG_SPACE(fd_size as libc::c_uint) } as usize;
-    let mut control_buf = vec![0u8; cmsg_size];
-    let mut recv_buf = [0u8; 1];
-    let mut iov = libc::iovec {
-        iov_base: recv_buf.as_mut_ptr() as *mut libc::c_void,
-        iov_len: recv_buf.len(),
-    };
-    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-    msg.msg_iov = &mut iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = control_buf.as_mut_ptr() as *mut libc::c_void;
-    msg.msg_controllen = cmsg_size as _;
-
-    let result = unsafe { libc::recvmsg(fd, &mut msg, 0) };
-    if result < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    if result == 0 {
-        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "LB disconnected"));
-    }
-
-    unsafe {
-        let cmsg = libc::CMSG_FIRSTHDR(&msg);
-        if cmsg.is_null() {
-            return Err(std::io::Error::new(std::io::ErrorKind::Other, "No CMSG received"));
-        }
-        if (*cmsg).cmsg_level != libc::SOL_SOCKET || (*cmsg).cmsg_type != libc::SCM_RIGHTS {
-            return Err(std::io::Error::new(std::io::ErrorKind::Other, "Unexpected CMSG type"));
-        }
-        let data_ptr = libc::CMSG_DATA(cmsg) as *mut RawFd;
-        Ok(*data_ptr)
-    }
-}
 
 struct AppState {
     dataset: Arc<Dataset>,
@@ -158,30 +123,38 @@ fn main() {
     let mcc_data = fs::read("resources/mcc_risk.json").expect("mcc_risk.json not found");
     init_mcc_risk_table(&mcc_data);
 
-    println!("[API] Loading index_v2.bin...");
-    let ds = Dataset::load_from_bin("resources/index_v2.bin");
-    println!("[API] Dataset loaded: {} vectors, {} cells", ds.count, ds.num_cells);
+    let state_lock: Arc<RwLock<Option<Arc<AppState>>>> = Arc::new(RwLock::new(None));
 
-    println!("[API] Building IVF index...");
-    let ivf = IVFIndex::build_from_dataset(&ds, ds.num_cells);
-    println!("[API] IVF index built: {} cells", ivf.num_cells);
+    let state_for_load = Arc::clone(&state_lock);
+    thread::spawn(move || {
+        println!("[API] Loading index_v2.bin...");
+        let ds = Dataset::load_from_bin("resources/index_v2.bin");
+        println!("[API] Dataset loaded: {} vectors, {} cells", ds.count, ds.num_cells);
 
-    #[cfg(target_os = "linux")]
-    unsafe {
-        let ptr = ds.dims.as_ptr() as *const libc::c_void;
-        let len = ds.dims.len() * 2;
-        libc::mlock(ptr, len);
-        println!("[API] mlock applied");
-    }
+        println!("[API] Building IVF index...");
+        let ivf = IVFIndex::build_from_dataset(&ds, ds.num_cells);
+        println!("[API] IVF index built: {} cells", ivf.num_cells);
 
-    let state = Arc::new(AppState {
-        dataset: Arc::new(ds),
-        ivf: Arc::new(ivf),
+        #[cfg(target_os = "linux")]
+        unsafe {
+            let ptr = ds.dims.as_ptr() as *const libc::c_void;
+            let len = ds.dims.len() * 2;
+            libc::mlock(ptr, len);
+            println!("[API] mlock applied");
+        }
+
+        let state = AppState {
+            dataset: Arc::new(ds),
+            ivf: Arc::new(ivf),
+        };
+
+        let state_arc = Arc::new(state);
+        warm_up(&state_arc);
+
+        let mut w = state_for_load.write().unwrap();
+        *w = Some(state_arc);
+        println!("[API] Warm-up complete — ready for requests");
     });
-
-    warm_up(&state);
-
-    let state_arc = Arc::clone(&state);
 
     if let Some(fd) = uds_listener_fd {
         println!("[API] Listening on Unix socket {} (SOCK_SEQPACKET)", mode);
@@ -198,7 +171,7 @@ fn main() {
 
             println!("[API] LB connected (uds_fd={})", uds_fd);
 
-            let state_clone = Arc::clone(&state_arc);
+            let state_clone = Arc::clone(&state_lock);
             thread::spawn(move || {
                 let fd_size = std::mem::size_of::<RawFd>();
                 let cmsg_size = unsafe { libc::CMSG_SPACE(fd_size as libc::c_uint) } as usize;
@@ -276,7 +249,7 @@ fn main() {
             match stream {
                 Ok(stream) => {
                     let _ = stream.set_nodelay(true);
-                    let state_clone = Arc::clone(&state_arc);
+                    let state_clone = Arc::clone(&state_lock);
                     thread::spawn(move || {
                         handle_connection(stream, |body| {
                             handle_fraud_score(body, &state_clone)
@@ -296,10 +269,9 @@ fn warm_up(state: &AppState) {
         let _ = state.ivf.search(&state.dataset, &query, 5, ivf::IVF_NPROBE_EASY);
         query[0] = query[0].wrapping_add(100);
     }
-    println!("[API] Warm-up complete");
 }
 
-fn handle_fraud_score(body: &[u8], state: &AppState) -> FraudResult {
+fn handle_fraud_score(body: &[u8], state_lock: &Arc<RwLock<Option<Arc<AppState>>>>) -> FraudResult {
     let tx = parse_transaction(body);
     let mut v = [0.0f32; 14];
     vectorize(&tx, &mut v);
@@ -310,11 +282,16 @@ fn handle_fraud_score(body: &[u8], state: &AppState) -> FraudResult {
         FastResult::Borderline => {}
     }
 
-    let mut qv = [0i16; 14];
-    for d in 0..14 {
-        qv[d] = quantize(v[d]);
+    let r = state_lock.read().unwrap();
+    match r.as_ref() {
+        Some(state) => {
+            let mut qv = [0i16; 14];
+            for d in 0..14 {
+                qv[d] = quantize(v[d]);
+            }
+            let fraud_count = state.ivf.search(&state.dataset, &qv, 5, 1);
+            FraudResult::Score(fraud_count)
+        }
+        None => FraudResult::Error,
     }
-
-    let fraud_count = state.ivf.search(&state.dataset, &qv, 5, 1);
-    FraudResult::Score(fraud_count)
 }

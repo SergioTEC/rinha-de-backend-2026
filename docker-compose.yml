@@ -1,6 +1,8 @@
 services:
   lb:
     image: ghcr.io/sergiotec/rinha-2026:latest
+    platform: linux/amd64
+    cpuset: "1,3"
     command: ["/app/lb"]
     ports:
       - "9999:9999"
@@ -12,30 +14,31 @@ services:
     depends_on:
       - api1
       - api2
+    volumes:
+      - sockets:/tmp/sockets
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    restart: unless-stopped
+    logging:
+      driver: "none"
     deploy:
       resources:
         limits:
           cpus: '0.05'
           memory: '30MB'
-    ulimits:
-      nofile:
-        soft: 65535
-        hard: 65535
-    volumes:
-      - sockets:/tmp/sockets
 
   api1:
     image: ghcr.io/sergiotec/rinha-2026:latest
+    platform: linux/amd64
+    cpuset: "0"
     command: ["/app/api"]
     environment:
       - LISTEN_SOCKET=/tmp/sockets/api1.sock
-    networks:
-      - rinha
-    deploy:
-      resources:
-        limits:
-          cpus: '0.475'
-          memory: '160MB'
+    network_mode: "none"
+    volumes:
+      - sockets:/tmp/sockets
     ulimits:
       nofile:
         soft: 65535
@@ -43,20 +46,25 @@ services:
       memlock:
         soft: -1
         hard: -1
-    volumes:
-      - sockets:/tmp/sockets
+    restart: unless-stopped
+    logging:
+      driver: "none"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.475'
+          memory: '160MB'
 
   api2:
     image: ghcr.io/sergiotec/rinha-2026:latest
+    platform: linux/amd64
+    cpuset: "2"
     command: ["/app/api"]
     environment:
       - LISTEN_SOCKET=/tmp/sockets/api2.sock
     network_mode: "none"
-    deploy:
-      resources:
-        limits:
-          cpus: '0.475'
-          memory: '160MB'
+    volumes:
+      - sockets:/tmp/sockets
     ulimits:
       nofile:
         soft: 65535
@@ -64,8 +72,14 @@ services:
       memlock:
         soft: -1
         hard: -1
-    volumes:
-      - sockets:/tmp/sockets
+    restart: unless-stopped
+    logging:
+      driver: "none"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.475'
+          memory: '160MB'
 
 volumes:
   sockets:
