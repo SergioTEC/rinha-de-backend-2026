@@ -16,13 +16,6 @@ fn main() {
         .map(|s| s.trim().to_string())
         .collect();
 
-    let mut backends: Vec<RawFd> = Vec::with_capacity(backend_paths.len());
-    for path in &backend_paths {
-        wait_for_socket(path, 600, 100);
-        let fd = connect_seqpacket(path, 3000, 10).expect("backend connect failed");
-        backends.push(fd);
-    }
-
     let lfd = unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
         if fd < 0 {
@@ -31,7 +24,6 @@ fn main() {
         let on: i32 = 1;
         libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR, &on as *const _ as *const libc::c_void, 4);
         libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT, &on as *const _ as *const libc::c_void, 4);
-        libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_DEFER_ACCEPT, &on as *const _ as *const libc::c_void, 4);
 
         let mut addr: libc::sockaddr_in = std::mem::zeroed();
         addr.sin_family = libc::AF_INET as _;
@@ -47,17 +39,29 @@ fn main() {
         fd
     };
 
+    let mut backends: Vec<Option<RawFd>> = vec![None; backend_paths.len()];
+    for (i, path) in backend_paths.iter().enumerate() {
+        wait_for_socket(path, 600, 100);
+        match connect_seqpacket(path, 3000, 10) {
+            Ok(fd) => {
+                backends[i] = Some(fd);
+            }
+            Err(e) => {
+                eprintln!("[LB] Failed to connect to {}: {}", path, e);
+            }
+        }
+    }
+
     let mut next_backend = 0usize;
 
     loop {
         let client_fd = unsafe {
-            libc::accept4(lfd, std::ptr::null_mut(), std::ptr::null_mut(), libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK)
+            libc::accept4(lfd, std::ptr::null_mut(), std::ptr::null_mut(), libc::SOCK_CLOEXEC)
         };
         if client_fd < 0 {
             let err = io::Error::last_os_error();
             if err.kind() == io::ErrorKind::WouldBlock {
-                std::thread::sleep(std::time::Duration::from_micros(15));
-                continue;
+                std::thread::sleep(std::time::Duration::from_micros(100));
             }
             continue;
         }
@@ -65,13 +69,41 @@ fn main() {
         unsafe {
             let on: i32 = 1;
             libc::setsockopt(client_fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, &on as *const _ as *const libc::c_void, 4);
-            libc::setsockopt(client_fd, libc::IPPROTO_TCP, libc::TCP_QUICKACK, &on as *const _ as *const libc::c_void, 4);
         }
 
-        let idx = next_backend;
-        next_backend = (next_backend + 1) % backends.len();
+        let any_backend = backends.iter().any(|b| b.is_some());
+        if !any_backend {
+            let resp = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            unsafe {
+                libc::write(client_fd, resp.as_ptr() as *const libc::c_void, resp.len());
+            }
+            unsafe { libc::close(client_fd); }
+            continue;
+        }
 
-        if send_fd_seqpacket(backends[idx], client_fd).is_err() {
+        let mut sent = false;
+        let mut attempts = 0;
+        while attempts < backends.len() {
+            let idx = next_backend;
+            next_backend = (next_backend + 1) % backends.len();
+            attempts += 1;
+
+            if let Some(backend_fd) = backends[idx] {
+                if send_fd_seqpacket(backend_fd, client_fd).is_ok() {
+                    sent = true;
+                    break;
+                } else {
+                    unsafe { libc::close(backend_fd); }
+                    backends[idx] = None;
+                }
+            }
+        }
+
+        if !sent {
+            let resp = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            unsafe {
+                libc::write(client_fd, resp.as_ptr() as *const libc::c_void, resp.len());
+            }
             unsafe { libc::close(client_fd); }
         }
     }

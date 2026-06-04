@@ -12,11 +12,12 @@ services:
     depends_on:
       - api1
       - api2
+    restart: unless-stopped
     deploy:
       resources:
         limits:
           cpus: '0.10'
-          memory: '30MB'
+          memory: '20MB'
     ulimits:
       nofile:
         soft: 65535
@@ -31,13 +32,12 @@ services:
     command: ["/app/api"]
     environment:
       - LISTEN_SOCKET=/tmp/sockets/api1.sock
-    networks:
-      - rinha
+    restart: unless-stopped
     deploy:
       resources:
         limits:
-          cpus: '0.40'
-          memory: '155MB'
+          cpus: '0.45'
+          memory: '165MB'
     ulimits:
       nofile:
         soft: 65535
@@ -55,13 +55,13 @@ services:
     command: ["/app/api"]
     environment:
       - LISTEN_SOCKET=/tmp/sockets/api2.sock
-    networks:
-      - rinha
+    network_mode: "none"
+    restart: unless-stopped
     deploy:
       resources:
         limits:
-          cpus: '0.40'
-          memory: '155MB'
+          cpus: '0.45'
+          memory: '165MB'
     ulimits:
       nofile:
         soft: 65535
