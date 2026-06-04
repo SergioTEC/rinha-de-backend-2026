@@ -5,38 +5,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn main() {
-<<<<<<< HEAD
-    let port = env::var("LB_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(9999u16);
-
-    let backends_env = env::var("LB_BACKENDS")
-        .unwrap_or_else(|_| "/tmp/sockets/api1.sock,/tmp/sockets/api2.sock".to_string());
-    
-    let backend_sockets: Vec<String> = backends_env
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect();
-
-    println!("[LB] Starting on port {}", port);
-    println!("[LB] Backends: {:?}", backend_sockets);
-
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
-        .expect("Failed to bind TCP");
-
-    let mut backends: Vec<Option<UnixStream>> = Vec::new();
-    for path in &backend_sockets {
-        match UnixStream::connect(path) {
-            Ok(stream) => {
-                println!("[LB] Connected to {}", path);
-                backends.push(Some(stream));
-            }
-            Err(e) => {
-                eprintln!("[LB] Failed to connect to {}: {}", path, e);
-                backends.push(None);
-            }
-=======
     let port = env::var("PORT").unwrap_or_else(|_| "9999".to_string());
     let port: u16 = port.parse().unwrap_or(9999);
     let upstreams = env::var("FD_UPSTREAMS").unwrap_or_else(|_| "/tmp/sock/api1.sock,/tmp/sock/api2.sock".to_string());
@@ -54,7 +22,6 @@ fn main() {
         addr.sin_addr.s_addr = libc::INADDR_ANY;
         if libc::bind(fd, &addr as *const _ as *const libc::sockaddr, std::mem::size_of::<libc::sockaddr_in>() as u32) < 0 {
             panic!("bind: {}", io::Error::last_os_error());
->>>>>>> submission
         }
         if libc::listen(fd, 65535) < 0 { panic!("listen: {}", io::Error::last_os_error()); }
         fd
@@ -78,31 +45,6 @@ fn main() {
 
     let rr = AtomicUsize::new(0);
 
-<<<<<<< HEAD
-    for stream in listener.incoming() {
-        match stream {
-            Ok(client) => {
-                // Round-robin
-                let mut attempts = 0;
-                while attempts < backends.len() {
-                    let idx = next_backend;
-                    next_backend = (next_backend + 1) % backends.len();
-                    attempts += 1;
-
-                    if let Some(ref mut unix) = backends[idx] {
-                        let fd = client.as_raw_fd();
-                        if let Err(e) = send_fd(unix, fd) {
-                            eprintln!("[LB] send_fd error: {}", e);
-                            // Try to reconnect
-                            if let Ok(new) = UnixStream::connect(&backend_sockets[idx]) {
-                                backends[idx] = Some(new);
-                            }
-                            continue;
-                        }
-                        break;
-                    }
-                }
-=======
     loop {
         let cf = unsafe { libc::accept4(lfd, std::ptr::null_mut(), std::ptr::null_mut(), libc::SOCK_CLOEXEC) };
         if cf < 0 {
@@ -110,7 +52,6 @@ fn main() {
             if e.kind() == io::ErrorKind::WouldBlock {
                 let mut pfd = libc::pollfd { fd: lfd, events: libc::POLLIN, revents: 0 };
                 unsafe { libc::poll(&mut pfd, 1, -1); }
->>>>>>> submission
             }
             continue;
         }
@@ -178,17 +119,6 @@ fn send_fd(backend_fd: RawFd, client_fd: RawFd) -> io::Result<()> {
         (*cm).cmsg_len = libc::CMSG_LEN(fdsz as u32) as _;
         *(libc::CMSG_DATA(cm) as *mut RawFd) = client_fd;
     }
-<<<<<<< HEAD
-
-    let res = unsafe { libc::sendmsg(sock_fd, &msg, 0) };
-    if res < 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    Ok(())
-}
-=======
     let r = unsafe { libc::sendmsg(backend_fd, &msg, libc::MSG_NOSIGNAL) };
     if r < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
 }
->>>>>>> submission
