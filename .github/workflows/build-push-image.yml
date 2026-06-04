@@ -1,0 +1,66 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches: [submission]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-zigbuild
+        run: cargo install --locked cargo-zigbuild
+
+      - name: Install cross compilation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools gcc-x86-64-linux-gnu
+
+      - name: Add x86_64-unknown-linux-gnu target
+        run: rustup target add x86_64-unknown-linux-gnu
+
+      - name: Cross-compile api
+        working-directory: api
+        run: RINHA_SKIP_C_AVX2=1 cargo zigbuild --target x86_64-unknown-linux-gnu --release --bin api
+
+      - name: Cross-compile lb
+        working-directory: lb
+        run: RINHA_SKIP_C_AVX2=1 cargo zigbuild --target x86_64-unknown-linux-gnu --release --bin lb
+
+      - name: Copy binaries to root target directory
+        run: |
+          mkdir -p target/x86_64-unknown-linux-gnu/release
+          cp api/target/x86_64-unknown-linux-gnu/release/api target/x86_64-unknown-linux-gnu/release/
+          cp lb/target/x86_64-unknown-linux-gnu/release/lb target/x86_64-unknown-linux-gnu/release/
+          ls -la target/x86_64-unknown-linux-gnu/release/
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/sergiotec/rinha-2026:latest
+            ghcr.io/sergiotec/rinha-2026:${{ github.sha }}
+          cache-from: type=registry,ref=ghcr.io/sergiotec/rinha-2026:latest
+          cache-to: type=inline
