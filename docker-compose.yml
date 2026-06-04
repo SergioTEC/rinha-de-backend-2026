@@ -16,7 +16,7 @@ services:
       resources:
         limits:
           cpus: '0.10'
-          memory: '10MB'
+          memory: '30MB'
     cpuset: "2,3"
     ulimits:
       nofile:
@@ -38,7 +38,7 @@ services:
       resources:
         limits:
           cpus: '0.40'
-          memory: '165MB'
+          memory: '155MB'
     cpuset: "0"
     ulimits:
       nofile:
@@ -63,7 +63,7 @@ services:
       resources:
         limits:
           cpus: '0.40'
-          memory: '165MB'
+          memory: '155MB'
     cpuset: "1"
     ulimits:
       nofile:

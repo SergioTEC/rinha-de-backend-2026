@@ -3,6 +3,8 @@ use std::io;
 use std::net::TcpListener;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
+const SMALL_STACK: usize = 32 * 1024;
+
 fn main() {
     let port = env::var("LB_PORT")
         .ok()
@@ -51,7 +53,7 @@ fn main() {
     for path in &backend_paths {
         let path = path.clone();
         let tx = backend_tx.clone();
-        std::thread::spawn(move || {
+        let result = std::thread::Builder::new().stack_size(SMALL_STACK).spawn(move || {
             if wait_for_socket(&path, 600, 100).is_err() {
                 println!("[LB] Timeout waiting for {}", path);
                 let _ = tx.send(Some(Err(io::Error::new(
@@ -64,7 +66,7 @@ fn main() {
 
             let result = connect_seqpacket(&path, 300, 100);
             let _ = tx.send(result);
-        });
+        }).unwrap();
     }
 
     let mut backends: Vec<Option<RawFd>> = Vec::with_capacity(backend_paths.len());
@@ -96,12 +98,15 @@ fn main() {
         match stream {
             Ok(client) => {
                 let _ = client.set_nodelay(true);
-                let client_fd = client.as_raw_fd();
 
                 if connected_count == 0 {
+                    let resp = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = unsafe { libc::write(client.as_raw_fd(), resp.as_ptr() as *const libc::c_void, resp.len()) };
                     drop(client);
                     continue;
                 }
+
+                let client_fd = client.as_raw_fd();
 
                 let mut attempts = 0;
                 let mut sent = false;
