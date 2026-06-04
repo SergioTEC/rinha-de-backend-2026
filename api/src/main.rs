@@ -5,6 +5,7 @@ mod fastpath;
 mod ivf;
 mod http;
 mod server;
+mod cache;
 
 use std::env;
 use std::fs;
@@ -110,6 +111,10 @@ pub fn process(body: &[u8], state: &AppState) -> FraudResult {
     for d in 0..14 {
         qv[d] = quantize(v[d]);
     }
-    let fraud_count = state.ivf.search(&state.dataset, &qv, 5, 1);
-    FraudResult::Score(fraud_count)
+    if let Some(cached) = cache::lookup(&qv) {
+        return FraudResult::Score(cached as usize);
+    }
+    let fraud_count = state.ivf.search(&state.dataset, &qv, 5, 1) as u8;
+    cache::insert(&qv, fraud_count);
+    FraudResult::Score(fraud_count as usize)
 }

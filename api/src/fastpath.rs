@@ -75,5 +75,27 @@ pub fn fast_path(v: &[f32; 14]) -> FastResult {
         return FastResult::Fraud;
     }
 
+    // === EXTENDED (covers more borderline cases) ===
+
+    // Moderate amount, very close, low risk MCC
+    if amount < 0.4 && mcc_risk < 0.4 && km_home < 0.1 && unknown_merchant < 0.7 {
+        return FastResult::Legit;
+    }
+
+    // Low amount, few tx, card present
+    if amount < 0.2 && tx_count < 0.3 && card_present > 0.5 {
+        return FastResult::Legit;
+    }
+
+    // Online + high amount + unknown merchant (likely fraud)
+    if is_online > 0.5 && amount > 0.3 && unknown_merchant > 0.5 && mcc_risk > 0.4 {
+        return FastResult::Fraud;
+    }
+
+    // Extreme tx_count + unknown merchant
+    if tx_count > 0.7 && unknown_merchant > 0.7 {
+        return FastResult::Fraud;
+    }
+
     FastResult::Borderline
 }
