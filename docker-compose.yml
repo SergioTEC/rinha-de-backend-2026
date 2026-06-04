@@ -8,26 +8,22 @@ services:
       - "9999:9999"
     environment:
       - LB_PORT=9999
-      - LB_BACKENDS=/tmp/sockets/api1.sock,/tmp/sockets/api2.sock
+      - LB_BACKENDS=api1:9001,api2:9002
     networks:
       - rinha
     depends_on:
       - api1
       - api2
-    volumes:
-      - sockets:/tmp/sockets
     ulimits:
       nofile:
         soft: 65535
         hard: 65535
     restart: unless-stopped
-    logging:
-      driver: "none"
     deploy:
       resources:
         limits:
           cpus: '0.05'
-          memory: '30MB'
+          memory: '20MB'
 
   api1:
     image: ghcr.io/sergiotec/rinha-2026:latest
@@ -35,10 +31,9 @@ services:
     cpuset: "0"
     command: ["/app/api"]
     environment:
-      - LISTEN_SOCKET=/tmp/sockets/api1.sock
-    network_mode: "none"
-    volumes:
-      - sockets:/tmp/sockets
+      - PORT=9001
+    networks:
+      - rinha
     ulimits:
       nofile:
         soft: 65535
@@ -47,13 +42,11 @@ services:
         soft: -1
         hard: -1
     restart: unless-stopped
-    logging:
-      driver: "none"
     deploy:
       resources:
         limits:
           cpus: '0.475'
-          memory: '160MB'
+          memory: '165MB'
 
   api2:
     image: ghcr.io/sergiotec/rinha-2026:latest
@@ -61,10 +54,9 @@ services:
     cpuset: "2"
     command: ["/app/api"]
     environment:
-      - LISTEN_SOCKET=/tmp/sockets/api2.sock
-    network_mode: "none"
-    volumes:
-      - sockets:/tmp/sockets
+      - PORT=9002
+    networks:
+      - rinha
     ulimits:
       nofile:
         soft: 65535
@@ -73,21 +65,11 @@ services:
         soft: -1
         hard: -1
     restart: unless-stopped
-    logging:
-      driver: "none"
     deploy:
       resources:
         limits:
           cpus: '0.475'
-          memory: '160MB'
-
-volumes:
-  sockets:
-    driver: local
-    driver_opts:
-      type: tmpfs
-      device: tmpfs
-      o: "size=4m,uid=0,gid=0,mode=0777"
+          memory: '165MB'
 
 networks:
   rinha:
