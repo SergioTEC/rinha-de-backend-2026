@@ -9,19 +9,23 @@ use std::env;
 use std::fs;
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::time::Instant;
 
 use json_parser::{init_mcc_risk_table, parse_transaction};
 use vectorize::{vectorize, quantize};
 use dataset::Dataset;
 use fastpath::{fast_path, FastResult};
 use ivf::IVFIndex;
-use http::{FraudResult, handle_connection, HTTP_READY};
+use http::{FraudResult, handle_connection};
 
 struct AppState {
     dataset: Arc<Dataset>,
     ivf: Arc<IVFIndex>,
 }
+
+const NUM_WORKERS: usize = 4;
 
 fn main() {
     let sock_path = env::var("SOCK").unwrap_or_default();
@@ -49,7 +53,7 @@ fn main() {
         }
         if libc::listen(fd, 64) < 0 { panic!("listen UDS: {}", std::io::Error::last_os_error()); }
 
-        let sndbuf: i32 = 256 * 1024;
+        let sndbuf: i32 = 1024 * 1024;
         libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_SNDBUF, &sndbuf as *const _ as *const libc::c_void, 4);
 
         unsafe { libc::chmod(sock_path.as_ptr() as *const libc::c_char, 0o777); }
@@ -63,7 +67,7 @@ fn main() {
 
     let state = Arc::new(std::sync::Mutex::new(None::<Arc<AppState>>));
 
-    let state_clone = Arc::clone(&state);
+    let state_for_load = Arc::clone(&state);
     thread::spawn(move || {
         println!("[API] Loading index_v2.bin...");
         let ds = Dataset::load_from_bin("resources/index_v2.bin");
@@ -85,14 +89,22 @@ fn main() {
         let loaded_arc = Arc::new(loaded);
         warm_up(&loaded_arc);
 
-        let mut w = state_clone.lock().unwrap();
+        let mut w = state_for_load.lock().unwrap();
         *w = Some(loaded_arc);
         println!("[API] Ready for requests");
     });
 
-    println!("[API] Accepting LB connections...");
+    let queue: Arc<std::sync::Mutex<Vec<RawFd>>> = Arc::new(std::sync::Mutex::new(Vec::with_capacity(256)));
 
-    let state_arc = Arc::clone(&state);
+    for w_id in 0..NUM_WORKERS {
+        let q = Arc::clone(&queue);
+        let s = Arc::clone(&state);
+        thread::spawn(move || {
+            worker_loop(w_id, q, s);
+        });
+    }
+
+    println!("[API] Accepting LB connections with {NUM_WORKERS} workers...");
 
     loop {
         let conn_fd = unsafe {
@@ -103,7 +115,7 @@ fn main() {
             continue;
         }
 
-        let st = Arc::clone(&state_arc);
+        let q = Arc::clone(&queue);
         thread::spawn(move || {
             let fdsz = std::mem::size_of::<RawFd>();
             let cs = unsafe { libc::CMSG_SPACE(fdsz as u32) } as usize;
@@ -131,25 +143,44 @@ fn main() {
                 };
                 if client_fd < 0 { continue; }
 
-                let st2 = Arc::clone(&st);
-                thread::spawn(move || {
-                    unsafe {
-                        let mut stream = std::net::TcpStream::from_raw_fd(client_fd);
-                        let _ = stream.set_nonblocking(false);
-                        let _ = stream.set_nodelay(true);
-                        handle_connection(stream, |body| {
-                            let r = st2.lock().unwrap();
-                            match r.as_ref() {
-                                Some(state) => process(body, state),
-                                None => FraudResult::Error,
-                            }
-                        });
-                    }
-                });
+                q.lock().unwrap().push(client_fd);
             }
 
             unsafe { libc::close(conn_fd); }
         });
+    }
+}
+
+fn worker_loop(w_id: usize, queue: Arc<std::sync::Mutex<Vec<RawFd>>>, state: Arc<std::sync::Mutex<Option<Arc<AppState>>>>) {
+    loop {
+        let client_fd = {
+            let mut q = queue.lock().unwrap();
+            if q.is_empty() { None } else { Some(q.remove(0)) }
+        };
+
+        let client_fd = match client_fd {
+            Some(fd) => fd,
+            None => {
+                std::thread::sleep(std::time::Duration::from_micros(50));
+                continue;
+            }
+        };
+
+        let started = Instant::now();
+        unsafe {
+            let mut stream = std::net::TcpStream::from_raw_fd(client_fd);
+            let _ = stream.set_nonblocking(false);
+            let _ = stream.set_nodelay(true);
+            let r = state.lock().unwrap();
+            let s = r.as_ref().unwrap();
+            handle_connection(stream, |body| {
+                process(body, s)
+            });
+        }
+        let elapsed = started.elapsed();
+        if elapsed.as_millis() > 5 {
+            eprintln!("[API-w{w_id}] slow request: {} us", elapsed.as_micros());
+        }
     }
 }
 
