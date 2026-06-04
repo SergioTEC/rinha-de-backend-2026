@@ -7,8 +7,10 @@ mod http;
 
 use std::env;
 use std::fs;
+use std::os::fd::AsRawFd;
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::thread;
 
 use json_parser::{init_mcc_risk_table, parse_transaction};
@@ -23,9 +25,16 @@ struct AppState {
     ivf: Arc<IVFIndex>,
 }
 
+static STATE: OnceLock<Arc<AppState>> = OnceLock::new();
+
 fn main() {
     let sock_path = env::var("SOCK").unwrap_or_default();
     println!("[API] Starting...");
+
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::prctl(libc::PR_SET_TIMERSLACK, 1u64, 0, 0, 0);
+    }
 
     if let Some(parent) = std::path::Path::new(&sock_path).parent() {
         let _ = fs::create_dir_all(parent);
@@ -33,7 +42,7 @@ fn main() {
     let _ = fs::remove_file(&sock_path);
 
     let uds_fd = unsafe {
-        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0);
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
         if fd < 0 { panic!("socket: {}", std::io::Error::last_os_error()); }
 
         let pb = sock_path.as_bytes();
@@ -61,9 +70,6 @@ fn main() {
     let mcc_data = fs::read("resources/mcc_risk.json").expect("mcc_risk.json not found");
     init_mcc_risk_table(&mcc_data);
 
-    let state = Arc::new(std::sync::Mutex::new(None::<Arc<AppState>>));
-
-    let state_clone = Arc::clone(&state);
     thread::spawn(move || {
         println!("[API] Loading index_v2.bin...");
         let ds = Dataset::load_from_bin("resources/index_v2.bin");
@@ -78,21 +84,26 @@ fn main() {
             let ptr = ds.dims.as_ptr() as *const libc::c_void;
             let len = ds.dims.len() * 2;
             libc::mlock(ptr, len);
-            println!("[API] mlock applied");
+            let ptr_labels = ds.labels.as_ptr() as *const libc::c_void;
+            libc::mlock(ptr_labels, ds.labels.len());
+            let ptr_centroids = ds.centroids.as_ptr() as *const libc::c_void;
+            libc::mlock(ptr_centroids, ds.centroids.len() * std::mem::size_of::<[i16; 14]>());
+            let ptr_meta = ds.cell_meta.as_ptr() as *const libc::c_void;
+            libc::mlock(ptr_meta, ds.cell_meta.len() * 8);
+            let ptr_idx = ds.cell_indices.as_ptr() as *const libc::c_void;
+            libc::mlock(ptr_idx, ds.cell_indices.len() * 4);
+            println!("[API] mlock applied to all regions");
         }
 
         let loaded = AppState { dataset: Arc::new(ds), ivf: Arc::new(ivf) };
         let loaded_arc = Arc::new(loaded);
         warm_up(&loaded_arc);
 
-        let mut w = state_clone.lock().unwrap();
-        *w = Some(loaded_arc);
+        let _ = STATE.set(loaded_arc);
         println!("[API] Ready for requests");
     });
 
     println!("[API] Accepting LB connections...");
-
-    let state_arc = Arc::clone(&state);
 
     loop {
         let conn_fd = unsafe {
@@ -103,11 +114,10 @@ fn main() {
             continue;
         }
 
-        let st = Arc::clone(&state_arc);
         thread::spawn(move || {
             let fdsz = std::mem::size_of::<RawFd>();
             let cs = unsafe { libc::CMSG_SPACE(fdsz as u32) } as usize;
-            let mut cbuf = vec![0u8; cs];
+            let mut cbuf = [0u8; 64];
             let mut rbuf = [0u8; 1];
             let mut iov = libc::iovec {
                 iov_base: rbuf.as_mut_ptr() as *mut libc::c_void,
@@ -131,15 +141,17 @@ fn main() {
                 };
                 if client_fd < 0 { continue; }
 
-                let st2 = Arc::clone(&st);
                 thread::spawn(move || {
                     unsafe {
-                        let mut stream = std::net::TcpStream::from_raw_fd(client_fd);
+                        let stream = std::net::TcpStream::from_raw_fd(client_fd);
                         let _ = stream.set_nonblocking(false);
                         let _ = stream.set_nodelay(true);
+                        let _ = stream.set_ttl(64);
+                        let one: i32 = 1;
+                        let fd = stream.as_raw_fd();
+                        libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_QUICKACK, &one as *const _ as *const libc::c_void, 4);
                         handle_connection(stream, |body| {
-                            let r = st2.lock().unwrap();
-                            match r.as_ref() {
+                            match STATE.get() {
                                 Some(state) => process(body, state),
                                 None => FraudResult::Error,
                             }

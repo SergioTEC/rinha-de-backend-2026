@@ -85,7 +85,7 @@ fn main() {
 fn connect_uds(path: &str) -> io::Result<RawFd> {
     let pb = path.as_bytes();
     unsafe {
-        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0);
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
         if fd < 0 { return Err(io::Error::last_os_error()); }
         let mut sun: libc::sockaddr_un = std::mem::zeroed();
         sun.sun_family = libc::AF_UNIX as _;

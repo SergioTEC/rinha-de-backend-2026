@@ -52,17 +52,18 @@ impl Dataset {
         println!("[Dataset] Loading binary index: {} ({} bytes)", path, size);
         
         // Memory map with populate (forces page-in) and copy to Vec
-        let mmap = unsafe { 
+        let mmap = unsafe {
             memmap2::MmapOptions::new()
                 .populate()
                 .map(&file)
-                .expect("Failed to mmap index") 
+                .expect("Failed to mmap index")
         };
-        
+
         #[cfg(target_os = "linux")]
         unsafe {
             libc::madvise(mmap.as_ptr() as *mut libc::c_void, size, libc::MADV_WILLNEED);
             libc::madvise(mmap.as_ptr() as *mut libc::c_void, size, libc::MADV_RANDOM);
+            libc::madvise(mmap.as_ptr() as *mut libc::c_void, size, libc::MADV_HUGEPAGE);
         }
         
         // Prefetch: touch every page to force page-faults now (not under load)
