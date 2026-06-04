@@ -1,6 +1,6 @@
 use std::env;
 use std::io;
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::RawFd;
 
 fn main() {
     let port = env::var("LB_PORT")
@@ -15,6 +15,13 @@ fn main() {
         .split(',')
         .map(|s| s.trim().to_string())
         .collect();
+
+    let mut backends: Vec<RawFd> = Vec::with_capacity(backend_paths.len());
+    for path in &backend_paths {
+        wait_for_socket(path, 600, 100);
+        let fd = connect_seqpacket(path, 3000, 10).expect("backend connect failed");
+        backends.push(fd);
+    }
 
     let lfd = unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
@@ -39,13 +46,6 @@ fn main() {
         }
         fd
     };
-
-    let mut backends: Vec<RawFd> = Vec::with_capacity(backend_paths.len());
-    for path in &backend_paths {
-        wait_for_socket(path, 600, 100);
-        let fd = connect_seqpacket(path, 3000, 10).expect("backend connect failed");
-        backends.push(fd);
-    }
 
     let mut next_backend = 0usize;
 

@@ -61,6 +61,9 @@ struct AppState {
 }
 
 fn create_uds_listener(path: &str) -> i32 {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
     let _ = fs::remove_file(path);
 
     let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0) };
@@ -244,7 +247,8 @@ fn main() {
                     let state_spawn = Arc::clone(&state_clone);
                     thread::spawn(move || {
                         unsafe {
-                            let tcp_stream = std::net::TcpStream::from_raw_fd(tcp_fd);
+                            let mut tcp_stream = std::net::TcpStream::from_raw_fd(tcp_fd);
+                            let _ = tcp_stream.set_nonblocking(false);
                             let _ = tcp_stream.set_nodelay(true);
                             handle_connection(tcp_stream, |body| {
                                 handle_fraud_score(body, &state_spawn)
