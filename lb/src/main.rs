@@ -1,15 +1,7 @@
 use std::env;
 use std::io;
 use std::net::TcpListener;
-use std::os::unix::io::{AsRawFd, RawFd};
-
-// =====================================================================
-// TOP-3 STYLE LB
-// - Wait for sockets with stat() before connect (like lucasmontano)
-// - Persistent backend connections with auto-reconnect
-// - Accept connections even before backends are ready
-// - Threads for non-blocking backend connections
-// =====================================================================
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
 fn main() {
     let port = env::var("LB_PORT")
@@ -28,24 +20,38 @@ fn main() {
     println!("[LB] Starting on port {}", port);
     println!("[LB] Backends: {:?}", backend_paths);
 
-    // =====================================================================
-    // Bind TCP on port 9999 IMMEDIATELY
-    // =====================================================================
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
-        .expect("Failed to bind TCP");
+    let fd = unsafe {
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+        if fd < 0 {
+            panic!("Failed to create TCP socket: {}", io::Error::last_os_error());
+        }
+        let on: i32 = 1;
+        libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR, &on as *const _ as *const libc::c_void, std::mem::size_of::<i32>() as u32);
+        libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT, &on as *const _ as *const libc::c_void, std::mem::size_of::<i32>() as u32);
+
+        let mut addr: libc::sockaddr_in = std::mem::zeroed();
+        addr.sin_family = libc::AF_INET as _;
+        addr.sin_port = (port as u16).to_be();
+        addr.sin_addr.s_addr = libc::INADDR_ANY;
+
+        if libc::bind(fd, &addr as *const _ as *const libc::sockaddr, std::mem::size_of::<libc::sockaddr_in>() as u32) < 0 {
+            panic!("Failed to bind TCP: {}", io::Error::last_os_error());
+        }
+        if libc::listen(fd, 1024) < 0 {
+            panic!("Failed to listen: {}", io::Error::last_os_error());
+        }
+        fd
+    };
+    let listener = unsafe { TcpListener::from_raw_fd(fd) };
     listener.set_nonblocking(true).ok();
     println!("[LB] TCP listener bound on port {}", port);
 
-    // =====================================================================
-    // Connect to backends in background threads
-    // =====================================================================
     let (backend_tx, backend_rx) = std::sync::mpsc::channel::<Option<io::Result<RawFd>>>();
-    
+
     for path in &backend_paths {
         let path = path.clone();
         let tx = backend_tx.clone();
         std::thread::spawn(move || {
-            // Wait for socket file to exist (like lucasmontano/dalvorsn)
             if wait_for_socket(&path, 600, 100).is_err() {
                 println!("[LB] Timeout waiting for {}", path);
                 let _ = tx.send(Some(Err(io::Error::new(
@@ -55,9 +61,7 @@ fn main() {
                 return;
             }
             println!("[LB] Socket {} exists. Connecting...", path);
-            
-            // Try to connect with long retry (dataset may take ~15s to load)
-            // 300 retries × 100ms = 30s max
+
             let result = connect_seqpacket(&path, 300, 100);
             let _ = tx.send(result);
         });
@@ -71,13 +75,9 @@ fn main() {
     let mut next_backend = 0usize;
     let mut connected_count = 0usize;
 
-    println!("[LB] Ready (accepting connections while backends warm up)");
+    println!("[LB] Ready");
 
-    // =====================================================================
-    // ACCEPT LOOP
-    // =====================================================================
     for stream in listener.incoming() {
-        // Check new backend connections (non-blocking)
         while let Ok(Some(result)) = backend_rx.try_recv() {
             if let Some(idx) = backends.iter().position(|b| b.is_none()) {
                 match result {
@@ -95,12 +95,9 @@ fn main() {
 
         match stream {
             Ok(client) => {
-                // TCP optimizations
                 let _ = client.set_nodelay(true);
                 let client_fd = client.as_raw_fd();
 
-                // If no backends yet, still accept the connection (don't drop)
-                // This prevents "Conexão recusada" for the bot health check
                 if connected_count == 0 {
                     drop(client);
                     continue;
@@ -118,13 +115,11 @@ fn main() {
                             sent = true;
                             break;
                         } else {
-                            // Backend disconnected, try to reconnect
                             println!("[LB] Backend {} disconnected, reconnecting...", idx);
                             unsafe { libc::close(backend_fd); }
                             backends[idx] = None;
                             connected_count -= 1;
-                            
-                            // Fire off a reconnection attempt in background
+
                             let path = backend_paths[idx].clone();
                             let tx = backend_tx.clone();
                             std::thread::spawn(move || {
@@ -176,7 +171,6 @@ fn connect_seqpacket(path: &str, max_retries: usize, delay_ms: u64) -> Option<io
                 return Some(Err(io::Error::last_os_error()));
             }
 
-            // Increase send buffer (like lucasmontano/dalvorsn)
             let sndbuf: i32 = 256 * 1024;
             libc::setsockopt(
                 fd,

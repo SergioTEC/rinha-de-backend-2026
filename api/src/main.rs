@@ -1,6 +1,3 @@
-// Main entry point for Rinha API with Unix socket support (SCM_RIGHTS).
-// Top-3 style: persistent LB connections, socket created BEFORE dataset load.
-
 mod json_parser;
 mod vectorize;
 mod dataset;
@@ -22,9 +19,6 @@ use fastpath::{fast_path, FastResult};
 use ivf::IVFIndex;
 use http::{FraudResult, handle_connection};
 
-// =====================================================================
-// RAW FD RECV (lightweight, for persistent LB connections)
-// =====================================================================
 fn recv_fd_raw(fd: RawFd) -> std::io::Result<RawFd> {
     let fd_size = std::mem::size_of::<RawFd>();
     let cmsg_size = unsafe { libc::CMSG_SPACE(fd_size as libc::c_uint) } as usize;
@@ -66,9 +60,6 @@ struct AppState {
     ivf: Arc<IVFIndex>,
 }
 
-// =====================================================================
-// UDS: Create listener socket (SOCK_SEQPACKET) BEFORE loading dataset
-// =====================================================================
 fn create_uds_listener(path: &str) -> i32 {
     let _ = fs::remove_file(path);
 
@@ -77,7 +68,6 @@ fn create_uds_listener(path: &str) -> i32 {
         panic!("Failed to create SOCK_SEQPACKET socket: {}", std::io::Error::last_os_error());
     }
 
-    // Increase send buffer (like lucasmontano)
     let sndbuf: i32 = 256 * 1024;
     unsafe {
         libc::setsockopt(
@@ -117,7 +107,6 @@ fn create_uds_listener(path: &str) -> i32 {
         panic!("Failed to listen UDS: {}", std::io::Error::last_os_error());
     }
 
-    // Set permissions so LB can connect
     let path_cstr = std::ffi::CString::new(path).unwrap();
     unsafe { libc::chmod(path_cstr.as_ptr(), 0o777); }
 
@@ -145,10 +134,6 @@ fn main() {
     let mode = env::var("LISTEN_SOCKET").unwrap_or_default();
     println!("[API] Starting...");
 
-    // =====================================================================
-    // STEP 1: Create Unix socket IMMEDIATELY (before loading dataset)
-    // This allows LB to connect even while dataset is loading (~15s)
-    // =====================================================================
     let uds_listener_fd: Option<i32> = if mode.starts_with("/") {
         #[cfg(target_os = "linux")]
         {
@@ -167,9 +152,6 @@ fn main() {
         println!("[API] UDS listener created at {} (fd={})", mode, fd);
     }
 
-    // =====================================================================
-    // STEP 2: Load dataset (~15s in Docker)
-    // =====================================================================
     let mcc_data = fs::read("resources/mcc_risk.json").expect("mcc_risk.json not found");
     init_mcc_risk_table(&mcc_data);
 
@@ -181,7 +163,6 @@ fn main() {
     let ivf = IVFIndex::build_from_dataset(&ds, ds.num_cells);
     println!("[API] IVF index built: {} cells", ivf.num_cells);
 
-    // mlock to prevent swapping (Linux only, ignored on Mac)
     #[cfg(target_os = "linux")]
     unsafe {
         let ptr = ds.dims.as_ptr() as *const libc::c_void;
@@ -195,15 +176,10 @@ fn main() {
         ivf: Arc::new(ivf),
     });
 
-    // Warm-up
     warm_up(&state);
 
     let state_arc = Arc::clone(&state);
 
-    // =====================================================================
-    // STEP 3: Accept LB connections (persistent)
-    // Each LB connection spawns ONE thread that recvmsg()'s in a loop
-    // =====================================================================
     if let Some(fd) = uds_listener_fd {
         println!("[API] Listening on Unix socket {} (SOCK_SEQPACKET)", mode);
         println!("[API] Ready");
@@ -221,7 +197,6 @@ fn main() {
 
             let state_clone = Arc::clone(&state_arc);
             thread::spawn(move || {
-                // Pre-allocate recv buffers (avoid allocation per request)
                 let fd_size = std::mem::size_of::<RawFd>();
                 let cmsg_size = unsafe { libc::CMSG_SPACE(fd_size as libc::c_uint) } as usize;
                 let mut control_buf = vec![0u8; cmsg_size];
@@ -246,7 +221,7 @@ fn main() {
                                 eprintln!("[API] recvmsg error: {}", err);
                             }
                         }
-                        break; // LB disconnected
+                        break;
                     }
 
                     let tcp_fd = unsafe {
@@ -266,7 +241,6 @@ fn main() {
                         continue;
                     }
 
-                    // Spawn thread per client (spawn-per-connection model)
                     let state_spawn = Arc::clone(&state_clone);
                     thread::spawn(move || {
                         unsafe {
@@ -281,11 +255,9 @@ fn main() {
 
                 unsafe { libc::close(uds_fd); }
                 println!("[API] LB disconnected (uds_fd={})", uds_fd);
-                // The OS will clean up threads naturally when the LB reconnects
             });
         }
     } else {
-        // TCP fallback (macOS or no LISTEN_SOCKET)
         let port = env::var("PORT")
             .ok()
             .and_then(|s| s.parse().ok())
