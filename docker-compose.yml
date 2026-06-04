@@ -16,12 +16,15 @@ services:
       resources:
         limits:
           cpus: '0.10'
-          memory: '30MB'
+          memory: '20MB'
     cpuset: "2,3"
     ulimits:
       nofile:
         soft: 65535
         hard: 65535
+      stack:
+        soft: 256000
+        hard: 256000
     logging:
       driver: "none"
     volumes:
