@@ -111,14 +111,70 @@ impl IVFIndex {
 
 #[inline(always)]
 pub fn distance_i16(a: &[i16; DIMS], b: &[i16; DIMS]) -> i32 {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx2") {
+            return unsafe { distance_i16_avx2(a, b) };
+        }
+    }
     let mut sum: i32 = 0;
-    
     for d in 0..DIMS {
         let diff = a[d] as i32 - b[d] as i32;
         sum += diff * diff;
     }
-    
     sum
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn distance_i16_avx2(a: &[i16; DIMS], b: &[i16; DIMS]) -> i32 {
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+
+    // Layout: load 8 i16 at a time via _mm_loadu_si128 (16 bytes)
+    // DIMS = 14: 8 dims in first load, 6 dims in second load
+    let a0 = _mm_loadu_si128(a.as_ptr() as *const __m128i);
+    let b0 = _mm_loadu_si128(b.as_ptr() as *const __m128i);
+    let a1 = _mm_loadu_si128(a.as_ptr().add(8) as *const __m128i);
+    let b1 = _mm_loadu_si128(b.as_ptr().add(8) as *const __m128i);
+
+    // Compute diff = a - b (per i16)
+    let d0 = _mm_sub_epi16(a0, b0);
+    let d1 = _mm_sub_epi16(a0, b1);
+    // Wait that's wrong, let me redo:
+    let d0 = _mm_sub_epi16(a0, b0);
+    let d1 = _mm_sub_epi16(a1, b1);
+
+    // Square the diffs (i16 * i16 -> i32)
+    // _mm_madd_epi16 does: a0*b0 + a1*b1 + a2*b2 + a3*b3
+    // For squaring: it computes a[i]*a[i] + a[i+1]*a[i+1] etc, summing pairs
+    // We need to use that trick: dot of (d, d) gives us sum of d[i]^2 + d[i+1]^2
+    // But we want 8 separate values then sum them.
+    // Better: convert to i32, multiply, horizontal sum
+    let d0_lo = _mm_cvtepi16_epi32(d0);  // 4 i16 -> 4 i32
+    let d0_hi = _mm_cvtepi16_epi32(_mm_srli_si128(d0, 8));  // next 4 i16
+    let d1_lo = _mm_cvtepi16_epi32(d1);
+    let d1_hi = _mm_cvtepi16_epi32(_mm_srli_si128(d1, 8));
+
+    let d0_lo_sq = _mm_mullo_epi32(d0_lo, d0_lo);
+    let d0_hi_sq = _mm_mullo_epi32(d0_hi, d0_hi);
+    let d1_lo_sq = _mm_mullo_epi32(d1_lo, d1_lo);
+    let d1_hi_sq = _mm_mullo_epi32(d1_hi, d1_hi);
+
+    let sum0 = _mm_add_epi32(d0_lo_sq, d0_hi_sq);
+    let sum1 = _mm_add_epi32(d1_lo_sq, d1_hi_sq);
+    let sum = _mm_add_epi32(sum0, sum1);
+
+    // Horizontal sum of 4 i32
+    let shuf = _mm_shuffle_epi32(sum, 0b01_00_11_10);
+    let sums = _mm_add_epi32(sum, shuf);
+    let shuf2 = _mm_shuffle_epi32(sums, 0b00_00_00_11);
+    let result = _mm_add_epi32(sums, shuf2);
+
+    _mm_cvtsi128_si32(result)
 }
 
 #[cfg(test)]
