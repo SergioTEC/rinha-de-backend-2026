@@ -1,37 +1,53 @@
 services:
   lb:
     image: ghcr.io/sergiotec/rinha-2026:latest
-    platform: linux/amd64
-    cpuset: "1,3"
-    command: ["/app/lb"]
-    ports:
-      - "9999:9999"
-    environment:
-      - LB_PORT=9999
-      - LB_BACKENDS=api1:9001,api2:9002
-    networks:
-      - rinha
+    pull_policy: always
+    container_name: rinha-lb
+    hostname: lb
+    restart: always
+    security_opt:
+      - seccomp=unconfined
+    logging:
+      driver: "none"
     depends_on:
       - api1
       - api2
+    entrypoint: ["/app/lb"]
+    environment:
+      - PORT=9999
+      - FD_UPSTREAMS=/tmp/sock/api1.sock,/tmp/sock/api2.sock
+    ports:
+      - "9999:9999"
+    volumes:
+      - sock-volume:/tmp/sock
+    networks:
+      - rinha
     ulimits:
       nofile:
         soft: 65535
         hard: 65535
-    restart: unless-stopped
     deploy:
       resources:
         limits:
-          cpus: '0.05'
-          memory: '20MB'
+          cpus: "0.16"
+          memory: "30M"
 
   api1:
     image: ghcr.io/sergiotec/rinha-2026:latest
-    platform: linux/amd64
-    cpuset: "0"
-    command: ["/app/api"]
+    pull_policy: always
+    container_name: rinha-api1
+    hostname: api1
+    restart: always
+    security_opt:
+      - seccomp=unconfined
+    logging:
+      driver: "none"
+    depends_on:
+      - api2
     environment:
-      - PORT=9001
+      - SOCK=/tmp/sock/api1.sock
+    volumes:
+      - sock-volume:/tmp/sock
     networks:
       - rinha
     ulimits:
@@ -41,22 +57,27 @@ services:
       memlock:
         soft: -1
         hard: -1
-    restart: unless-stopped
     deploy:
       resources:
         limits:
-          cpus: '0.475'
-          memory: '165MB'
+          cpus: "0.42"
+          memory: "160M"
 
   api2:
     image: ghcr.io/sergiotec/rinha-2026:latest
-    platform: linux/amd64
-    cpuset: "2"
-    command: ["/app/api"]
+    pull_policy: always
+    container_name: rinha-api2
+    hostname: api2
+    restart: always
+    network_mode: "none"
+    security_opt:
+      - seccomp=unconfined
+    logging:
+      driver: "none"
     environment:
-      - PORT=9002
-    networks:
-      - rinha
+      - SOCK=/tmp/sock/api2.sock
+    volumes:
+      - sock-volume:/tmp/sock
     ulimits:
       nofile:
         soft: 65535
@@ -64,12 +85,19 @@ services:
       memlock:
         soft: -1
         hard: -1
-    restart: unless-stopped
     deploy:
       resources:
         limits:
-          cpus: '0.475'
-          memory: '165MB'
+          cpus: "0.42"
+          memory: "160M"
+
+volumes:
+  sock-volume:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=10m
 
 networks:
   rinha:

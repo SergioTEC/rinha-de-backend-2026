@@ -1,22 +1,14 @@
 use std::env;
 use std::io;
-use std::net::TcpStream;
-use std::os::unix::io::{IntoRawFd, RawFd};
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-static RR: AtomicUsize = AtomicUsize::new(0);
+use std::os::unix::io::RawFd;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 fn main() {
-    let port = env::var("LB_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(9999u16);
-
-    let backends: Vec<String> = env::var("LB_BACKENDS")
-        .unwrap_or_else(|_| "api1:9001,api2:9002".to_string())
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect();
+    let port = env::var("PORT").unwrap_or_else(|_| "9999".to_string());
+    let port: u16 = port.parse().unwrap_or(9999);
+    let upstreams = env::var("FD_UPSTREAMS").unwrap_or_else(|_| "/tmp/sock/api1.sock,/tmp/sock/api2.sock".to_string());
+    let upstream_paths: Vec<String> = upstreams.split(',').map(|s| s.trim().to_string()).collect();
 
     let lfd = unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0);
@@ -35,54 +27,101 @@ fn main() {
         fd
     };
 
-    let n = backends.len();
+    let backends = Arc::new(std::sync::Mutex::new(Vec::<RawFd>::new()));
+    let connected = Arc::new(AtomicBool::new(false));
+
+    for path in &upstream_paths {
+        let path = path.clone();
+        let b = Arc::clone(&backends);
+        let c = Arc::clone(&connected);
+        std::thread::spawn(move || {
+            loop {
+                match connect_uds(&path) {
+                    Ok(fd) => {
+                        let mut v = b.lock().unwrap();
+                        v.push(fd);
+                        if v.len() >= 2 { c.store(true, Ordering::Release); }
+                        break;
+                    }
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(25)),
+                }
+            }
+        });
+    }
+
+    let rr = AtomicUsize::new(0);
 
     loop {
-        let client_fd = unsafe {
-            libc::accept4(lfd, std::ptr::null_mut(), std::ptr::null_mut(), libc::SOCK_CLOEXEC)
-        };
-        if client_fd < 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::WouldBlock {
+        let cf = unsafe { libc::accept4(lfd, std::ptr::null_mut(), std::ptr::null_mut(), libc::SOCK_CLOEXEC) };
+        if cf < 0 {
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::WouldBlock {
                 let mut pfd = libc::pollfd { fd: lfd, events: libc::POLLIN, revents: 0 };
                 unsafe { libc::poll(&mut pfd, 1, -1); }
             }
             continue;
         }
 
-        let idx = RR.fetch_add(1, Ordering::Relaxed) % n;
+        if !connected.load(Ordering::Acquire) {
+            unsafe { libc::close(cf); }
+            continue;
+        }
 
-        let backend_fd = match TcpStream::connect(&backends[idx]) {
-            Ok(s) => s.into_raw_fd(),
-            Err(_) => { unsafe { libc::close(client_fd); } continue; }
-        };
+        unsafe {
+            let on: i32 = 1;
+            libc::setsockopt(cf, libc::IPPROTO_TCP, libc::TCP_NODELAY, &on as *const _ as *const libc::c_void, 4);
+        }
 
-        std::thread::spawn(move || {
-            unsafe {
-                let on: i32 = 1;
-                libc::setsockopt(client_fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, &on as *const _ as *const libc::c_void, 4);
-                libc::setsockopt(backend_fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, &on as *const _ as *const libc::c_void, 4);
-            }
-
-            let c2b = std::thread::spawn(move || { forward(client_fd, backend_fd); });
-            forward(backend_fd, client_fd);
-            let _ = c2b.join();
-
-            unsafe { libc::close(client_fd); libc::close(backend_fd); }
-        });
+        loop {
+            let bf = {
+                let v = backends.lock().unwrap();
+                if v.is_empty() { break; }
+                let idx = rr.fetch_add(1, Ordering::Relaxed) % v.len();
+                v[idx]
+            };
+            if send_fd(bf, cf).is_ok() { break; }
+        }
+        unsafe { libc::close(cf); }
     }
 }
 
-fn forward(from: RawFd, to: RawFd) {
-    let mut buf = [0u8; 16384];
-    loop {
-        let n = unsafe { libc::read(from, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-        if n <= 0 { break; }
-        let mut written = 0isize;
-        while written < n {
-            let w = unsafe { libc::write(to, buf.as_ptr().offset(written) as *mut libc::c_void, (n - written) as usize) };
-            if w <= 0 { return; }
-            written += w;
+fn connect_uds(path: &str) -> io::Result<RawFd> {
+    let pb = path.as_bytes();
+    unsafe {
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0);
+        if fd < 0 { return Err(io::Error::last_os_error()); }
+        let mut sun: libc::sockaddr_un = std::mem::zeroed();
+        sun.sun_family = libc::AF_UNIX as _;
+        let ap = sun.sun_path.as_mut_ptr();
+        let len = std::cmp::min(pb.len(), sun.sun_path.len() - 1);
+        for i in 0..len { *ap.add(i) = pb[i] as libc::c_char; }
+        let sl = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        if libc::connect(fd, &sun as *const _ as *const libc::sockaddr, sl) < 0 {
+            libc::close(fd);
+            return Err(io::Error::last_os_error());
         }
+        Ok(fd)
     }
+}
+
+fn send_fd(backend_fd: RawFd, client_fd: RawFd) -> io::Result<()> {
+    let dummy = [0u8; 1];
+    let fdsz = std::mem::size_of::<RawFd>();
+    let cs = unsafe { libc::CMSG_SPACE(fdsz as u32) } as usize;
+    let mut cbuf = [0u8; 64];
+    let mut iov = libc::iovec { iov_base: dummy.as_ptr() as *mut libc::c_void, iov_len: 1 };
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cbuf.as_mut_ptr() as *mut libc::c_void;
+    msg.msg_controllen = cs as _;
+    unsafe {
+        let cm = libc::CMSG_FIRSTHDR(&msg);
+        (*cm).cmsg_level = libc::SOL_SOCKET;
+        (*cm).cmsg_type = libc::SCM_RIGHTS;
+        (*cm).cmsg_len = libc::CMSG_LEN(fdsz as u32) as _;
+        *(libc::CMSG_DATA(cm) as *mut RawFd) = client_fd;
+    }
+    let r = unsafe { libc::sendmsg(backend_fd, &msg, libc::MSG_NOSIGNAL) };
+    if r < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
 }
