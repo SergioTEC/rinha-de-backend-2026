@@ -19,17 +19,13 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
 
-      - name: Install cargo-zigbuild
-        run: cargo install --locked cargo-zigbuild
-
-      - name: Install cross compilation dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools gcc-x86-64-linux-gnu
-
-      - name: Add x86_64-unknown-linux-gnu target
-        run: rustup target add x86_64-unknown-linux-gnu
+      - name: Setup zig and cargo-zigbuild
+        uses: rami3l/zigbuild-setup@v1
+        with:
+          zig-version: 0.16.0
 
       - name: Cross-compile api
         working-directory: api
