@@ -49,14 +49,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker image
+      - name: Build Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           platforms: linux/amd64
-          push: true
+          push: false
+          load: true
           tags: |
             ghcr.io/sergiotec/rinha-2026:latest
             ghcr.io/sergiotec/rinha-2026:${{ github.sha }}
           cache-from: type=registry,ref=ghcr.io/sergiotec/rinha-2026:latest
-          cache-to: type=inline
+
+      - name: Push Docker image to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          docker push ghcr.io/sergiotec/rinha-2026:latest
+          docker push ghcr.io/sergiotec/rinha-2026:${{ github.sha }}
