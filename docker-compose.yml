@@ -26,6 +26,7 @@ services:
           memory: 160M
 
   lb:
+<<<<<<< HEAD
     image: ghcr.io/SergioTEC/rinha-2026:latest
     container_name: lb
     command: /app/lb
@@ -36,19 +37,115 @@ services:
       - "9999:9999"
     volumes:
       - socks:/tmp/sockets
+=======
+    image: ghcr.io/sergiotec/rinha-2026:latest
+    pull_policy: always
+    container_name: rinha-lb
+    hostname: lb
+    restart: always
+    logging:
+      driver: "none"
+>>>>>>> submission
     depends_on:
       - api1
       - api2
+    entrypoint: ["/app/lb"]
+    environment:
+      - PORT=9999
+      - FD_UPSTREAMS=/tmp/sock/api1.sock,/tmp/sock/api2.sock
+    ports:
+      - "9999:9999"
+    volumes:
+      - sock-volume:/tmp/sock
+    networks:
+      - rinha
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     deploy:
       resources:
         limits:
+<<<<<<< HEAD
           cpus: '0.10'
           memory: 20M
 
 volumes:
   socks:
+=======
+          cpus: "0.16"
+          memory: "30M"
+
+  api1:
+    image: ghcr.io/sergiotec/rinha-2026:latest
+    pull_policy: always
+    container_name: rinha-api1
+    hostname: api1
+    restart: always
+    logging:
+      driver: "none"
+    command: ["/app/api"]
+    depends_on:
+      - api2
+    environment:
+      - SOCK=/tmp/sock/api1.sock
+    volumes:
+      - sock-volume:/tmp/sock
+    networks:
+      - rinha
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+      memlock:
+        soft: -1
+        hard: -1
+    deploy:
+      resources:
+        limits:
+          cpus: "0.42"
+          memory: "160M"
+
+  api2:
+    image: ghcr.io/sergiotec/rinha-2026:latest
+    pull_policy: always
+    container_name: rinha-api2
+    hostname: api2
+    restart: always
+    network_mode: "none"
+    logging:
+      driver: "none"
+    command: ["/app/api"]
+    environment:
+      - SOCK=/tmp/sock/api2.sock
+    volumes:
+      - sock-volume:/tmp/sock
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+      memlock:
+        soft: -1
+        hard: -1
+    deploy:
+      resources:
+        limits:
+          cpus: "0.42"
+          memory: "160M"
+
+volumes:
+  sock-volume:
+>>>>>>> submission
     driver: local
     driver_opts:
       type: tmpfs
       device: tmpfs
+<<<<<<< HEAD
       o: "size=10m"
+=======
+      o: size=10m
+
+networks:
+  rinha:
+    driver: bridge
+>>>>>>> submission

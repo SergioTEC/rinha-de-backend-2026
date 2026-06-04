@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Dockerfile único para Rinha Backend 2026
 # Builda API + LB em uma única imagem
 # Baseado no padrão do top 1 (dalvorsn)
@@ -48,3 +49,12 @@ EXPOSE 9999
 # Default entrypoint
 ENTRYPOINT ["/app/api"]
 CMD ["9999"]
+=======
+FROM debian:bookworm-slim
+
+WORKDIR /app
+
+COPY target/x86_64-unknown-linux-gnu/release/api /app/api
+COPY target/x86_64-unknown-linux-gnu/release/lb /app/lb
+COPY resources /app/resources
+>>>>>>> submission

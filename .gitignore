@@ -1,15 +1,35 @@
+# AGENTS.md - instruções locais para agents
+AGENTS.md
+
+# Rust build artifacts
 target/
-*.DS_Store
+Cargo.lock
+
+# Test results
+test/results.json
+test/*.json
+
+# Runtime
+sockets/
+
+# IDE
+.vscode/
+.idea/
 *.swp
 *.swo
-*~
-.env
-tmp/
-temp/
 
+<<<<<<< HEAD
 # Large binary files (generated/optional)
 resources/index.bin
 resources/references.json.gz
 
 # Local-only files
 AGENTS.md
+=======
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+>>>>>>> submission
