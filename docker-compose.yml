@@ -12,18 +12,15 @@ services:
     depends_on:
       - api1
       - api2
-    restart: unless-stopped
     deploy:
       resources:
         limits:
-          cpus: '0.10'
-          memory: '20MB'
+          cpus: '0.05'
+          memory: '30MB'
     ulimits:
       nofile:
         soft: 65535
         hard: 65535
-    logging:
-      driver: "none"
     volumes:
       - sockets:/tmp/sockets
 
@@ -32,12 +29,13 @@ services:
     command: ["/app/api"]
     environment:
       - LISTEN_SOCKET=/tmp/sockets/api1.sock
-    restart: unless-stopped
+    networks:
+      - rinha
     deploy:
       resources:
         limits:
-          cpus: '0.45'
-          memory: '165MB'
+          cpus: '0.475'
+          memory: '160MB'
     ulimits:
       nofile:
         soft: 65535
@@ -45,8 +43,6 @@ services:
       memlock:
         soft: -1
         hard: -1
-    logging:
-      driver: "none"
     volumes:
       - sockets:/tmp/sockets
 
@@ -56,12 +52,11 @@ services:
     environment:
       - LISTEN_SOCKET=/tmp/sockets/api2.sock
     network_mode: "none"
-    restart: unless-stopped
     deploy:
       resources:
         limits:
-          cpus: '0.45'
-          memory: '165MB'
+          cpus: '0.475'
+          memory: '160MB'
     ulimits:
       nofile:
         soft: 65535
@@ -69,8 +64,6 @@ services:
       memlock:
         soft: -1
         hard: -1
-    logging:
-      driver: "none"
     volumes:
       - sockets:/tmp/sockets
 
