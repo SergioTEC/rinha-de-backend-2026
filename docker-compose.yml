@@ -38,6 +38,7 @@ services:
     restart: always
     logging:
       driver: "none"
+    command: ["/app/api"]
     depends_on:
       - api2
     environment:
@@ -68,6 +69,7 @@ services:
     network_mode: "none"
     logging:
       driver: "none"
+    command: ["/app/api"]
     environment:
       - SOCK=/tmp/sock/api2.sock
     volumes:

@@ -2,7 +2,7 @@ use std::env;
 use std::io;
 use std::os::unix::io::RawFd;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn main() {
     let port = env::var("PORT").unwrap_or_else(|_| "9999".to_string());
@@ -27,24 +27,18 @@ fn main() {
         fd
     };
 
-    let backends = Arc::new(std::sync::Mutex::new(Vec::<RawFd>::new()));
-    let connected = Arc::new(AtomicBool::new(false));
+    let backends: Arc<std::sync::Mutex<Vec<RawFd>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     for path in &upstream_paths {
         let path = path.clone();
         let b = Arc::clone(&backends);
-        let c = Arc::clone(&connected);
         std::thread::spawn(move || {
             loop {
-                match connect_uds(&path) {
-                    Ok(fd) => {
-                        let mut v = b.lock().unwrap();
-                        v.push(fd);
-                        if v.len() >= 2 { c.store(true, Ordering::Release); }
-                        break;
-                    }
-                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(25)),
+                if let Ok(fd) = connect_uds(&path) {
+                    b.lock().unwrap().push(fd);
+                    return;
                 }
+                std::thread::sleep(std::time::Duration::from_millis(25));
             }
         });
     }
@@ -62,24 +56,27 @@ fn main() {
             continue;
         }
 
-        if !connected.load(Ordering::Acquire) {
-            unsafe { libc::close(cf); }
-            continue;
-        }
-
         unsafe {
             let on: i32 = 1;
             libc::setsockopt(cf, libc::IPPROTO_TCP, libc::TCP_NODELAY, &on as *const _ as *const libc::c_void, 4);
         }
 
-        loop {
-            let bf = {
-                let v = backends.lock().unwrap();
-                if v.is_empty() { break; }
+        let bf = {
+            let v = backends.lock().unwrap();
+            if v.is_empty() { None } else {
                 let idx = rr.fetch_add(1, Ordering::Relaxed) % v.len();
-                v[idx]
-            };
-            if send_fd(bf, cf).is_ok() { break; }
+                Some(v[idx])
+            }
+        };
+
+        match bf {
+            Some(bfd) => {
+                let _ = send_fd(bfd, cf);
+            }
+            None => {
+                let mut buf = [0u8; 64];
+                let _ = unsafe { libc::recv(cf, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
+            }
         }
         unsafe { libc::close(cf); }
     }
