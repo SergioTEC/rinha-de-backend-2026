@@ -22,10 +22,13 @@ jobs:
         with:
           targets: x86_64-unknown-linux-gnu
 
-      - name: Setup zig and cargo-zigbuild
-        uses: rami3l/zigbuild-setup@v1
+      - name: Install zig
+        uses: goto-bus-stop/setup-zig@v2
         with:
-          zig-version: 0.16.0
+          version: 0.16.0
+
+      - name: Install cargo-zigbuild
+        run: cargo install --locked cargo-zigbuild
 
       - name: Cross-compile api
         working-directory: api
