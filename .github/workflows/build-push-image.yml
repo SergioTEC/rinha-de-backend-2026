@@ -226,14 +226,14 @@ jobs:
           HTTP_4XX=${HTTP_4XX:-0}
           HTTP_TIMEOUT=$(grep -c "TIMEOUT" /tmp/codes.txt 2>/dev/null | head -1)
           HTTP_TIMEOUT=${HTTP_TIMEOUT:-0}
-          echo "Total: $TOTAL, HTTP 5xx: $HTTP_500, HTTP 4xx: $HTTP_4XX, Timeouts(>2s): $HTTP_TIMEOUT"
+          echo "Total: $TOTAL, HTTP 5xx: $HTTP_500, HTTP 4xx: $HTTP_4XX, Timeouts(>2.001s): $HTTP_TIMEOUT"
           if [ "$HTTP_500" -gt 50 ]; then
             echo "FALHOU: $HTTP_500 erros 5xx em $TOTAL (5%+)"
             docker compose logs
             exit 1
           fi
           if [ "$HTTP_TIMEOUT" -gt 25 ]; then
-            echo "::error::$HTTP_TIMEOUT timeouts (>2s) em $TOTAL (2.5%+) — API muito lenta!"
+            echo "::error::$HTTP_TIMEOUT timeouts (>2.001s) em $TOTAL (2.5%+) — API muito lenta!"
             docker compose logs
             exit 1
           fi
@@ -289,7 +289,7 @@ jobs:
             exit 1
           fi
           if [ "$TIME_OUTS" -gt 12 ]; then
-            echo "::error::$TIME_OUTS timeouts (>2s) em 500 (2.5%+) — performance muito degradada"
+            echo "::error::$TIME_OUTS timeouts (>2.001s) em 500 (2.5%+) — performance muito degradada"
             exit 1
           fi
 
