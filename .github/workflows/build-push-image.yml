@@ -67,9 +67,26 @@ jobs:
           set +e
           set +o pipefail
 
+          echo "=== Instalando stress para simular hardware mais lento ==="
+          sudo apt-get update -qq && sudo apt-get install -y -qq stress 2>&1 | tail -5
+          
+          echo "=== Iniciando stress de CPU (simula Mac Mini 2014 mais lento) ==="
+          # Mac Mini 2014: 2.6GHz dual-core, nosso runner é muito mais rápido
+          # Vamos ocupar 2-3 cores para reduzir CPU disponível
+          stress --cpu 3 --io 2 --vm 1 --vm-bytes 128M --timeout 600s &
+          STRESS_PID=$!
+          echo "Stress rodando em background (PID: $STRESS_PID)"
+          sleep 2
+          echo "Load atual: $(cat /proc/loadavg | awk '{print $1}')"
+
           echo "=== Subindo stack com imagem local ==="
           docker compose down --remove-orphans 2>&1 || true
           docker compose up -d 2>&1
+
+          echo ""
+          echo "=== Verificando limites de recursos ==="
+          sleep 2
+          docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" 2>/dev/null || echo "Containers ainda iniciando..."
 
           echo ""
           echo "=== Aguardando containers iniciarem (5s) ==="
@@ -279,6 +296,7 @@ jobs:
           echo ""
           echo "=== Teste de carga SUSTENTADA 60s @ ~40 RPS (mais próximo do bot) ==="
           echo "Detecta: race conditions, memory leaks, flakiness, saturation effects"
+          echo "Load atual antes da carga: $(cat /proc/loadavg | awk '{print $1}')"
           > /tmp/sust_codes.txt
           END_TS=$(( $(date +%s) + 60 ))
           REQ_COUNT=0
@@ -300,6 +318,7 @@ jobs:
             sleep 0.025
           done
           echo "Sustained: $REQ_COUNT requests em 60s, $ERR_COUNT timeouts/erros 5xx"
+          echo "Load após carga: $(cat /proc/loadavg | awk '{print $1}')"
           if [ "$ERR_COUNT" -gt "$((REQ_COUNT / 20))" ]; then
             echo "::error::$ERR_COUNT erros em $REQ_COUNT (>5%) — degradação severa"
             docker compose logs
@@ -349,6 +368,12 @@ jobs:
           echo ""
           echo "=== Cleanup ==="
           docker compose down --remove-orphans 2>&1 || true
+          
+          echo "=== Parando stress de CPU ==="
+          kill $STRESS_PID 2>/dev/null || true
+          wait $STRESS_PID 2>/dev/null || true
+          echo "Load final: $(cat /proc/loadavg | awk '{print $1}')"
+          
           echo "Testes locais passaram — prosseguindo para push"
 
       - name: Push Docker image to GHCR
