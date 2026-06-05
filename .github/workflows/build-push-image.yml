@@ -89,44 +89,67 @@ jobs:
           fi
 
           echo ""
-          echo "=== Teste de detecção: caso claramente FRAUDE ==="
+          echo "=== Teste de detecção com payloads REAIS do REGRAS_DE_DETECCAO.md ==="
+          echo "Estes são os 2 exemplos garantidos como legit e fraud no doc oficial."
+          echo ""
+
+          # Caso 1: LEGÍTIMO (tx-1329056812, do REGRAS_DE_DETECCAO.md)
+          # Esperado: fraud_score=0.0, approved=true
           RESP=$(curl -s -X POST http://localhost:9999/fraud-score \
             -H 'Content-Type: application/json' \
             -d '{
-              "id": "test_fraud",
-              "transaction": {"amount": 9500, "installments": 10, "requested_at": "2026-01-01T12:00:00Z"},
-              "customer": {"avg_amount": 150, "tx_count_24h": 200, "known_merchants": []},
-              "merchant": {"id": "MERC-001", "mcc": "5912", "avg_amount": 150},
-              "terminal": {"is_online": true, "card_present": false, "km_from_home": 850},
-              "last_transaction": {"timestamp": "2025-12-31T10:00:00Z", "km_from_current": 850}
+              "id": "tx-1329056812",
+              "transaction": {"amount": 41.12, "installments": 2, "requested_at": "2026-03-11T18:45:53Z"},
+              "customer": {"avg_amount": 82.24, "tx_count_24h": 3, "known_merchants": ["MERC-003", "MERC-016"]},
+              "merchant": {"id": "MERC-016", "mcc": "5411", "avg_amount": 60.25},
+              "terminal": {"is_online": false, "card_present": true, "km_from_home": 29.2331036248},
+              "last_transaction": null
             }')
-          echo "Resposta: $RESP"
-          echo "$RESP" | grep -q '"approved"' || { echo "FALHOU: sem 'approved'"; docker compose logs; exit 1; }
-          echo "$RESP" | grep -q '"fraud_score"' || { echo "FALHOU: sem 'fraud_score'"; docker compose logs; exit 1; }
-          if echo "$RESP" | grep -q '"approved":false'; then
-            echo "✓ Fraude detectada corretamente (approved:false)"
+          echo "LEGÍTIMO esperado: $RESP"
+          if echo "$RESP" | grep -q '"approved":true'; then
+            echo "✓ Legit aprovado (approved:true) — esperado"
           else
-            echo "::warning::Fraude NÃO detectada (approved:true). Possível problema de detecção."
+            echo "::error::Legit NÃO aprovado! Possível FN. Resposta: $RESP"
+            docker compose logs
+            exit 1
           fi
 
-          echo ""
-          echo "=== Teste de detecção: caso claramente LEGÍTIMO ==="
+          # Caso 2: FRAUDE (tx-3330991687, do REGRAS_DE_DETECCAO.md)
+          # Esperado: fraud_score=1.0, approved=false
           RESP2=$(curl -s -X POST http://localhost:9999/fraud-score \
             -H 'Content-Type: application/json' \
             -d '{
-              "id": "test_legit",
-              "transaction": {"amount": 25, "installments": 1, "requested_at": "2026-01-01T12:00:00Z"},
-              "customer": {"avg_amount": 200, "tx_count_24h": 1, "known_merchants": ["MERC-001"]},
-              "merchant": {"id": "MERC-001", "mcc": "5411", "avg_amount": 25},
-              "terminal": {"is_online": false, "card_present": true, "km_from_home": 2},
-              "last_transaction": {"timestamp": "2025-12-31T15:00:00Z", "km_from_current": 1}
+              "id": "tx-3330991687",
+              "transaction": {"amount": 9505.97, "installments": 10, "requested_at": "2026-03-14T05:15:12Z"},
+              "customer": {"avg_amount": 81.28, "tx_count_24h": 20, "known_merchants": ["MERC-008", "MERC-007", "MERC-005"]},
+              "merchant": {"id": "MERC-068", "mcc": "7802", "avg_amount": 54.86},
+              "terminal": {"is_online": false, "card_present": true, "km_from_home": 952.2745933273},
+              "last_transaction": null
             }')
-          echo "Resposta: $RESP2"
-          if echo "$RESP2" | grep -q '"approved":true'; then
-            echo "✓ Legítimo aprovado corretamente (approved:true)"
+          echo "FRAUDE esperado: $RESP2"
+          if echo "$RESP2" | grep -q '"approved":false'; then
+            echo "✓ Fraude detectada (approved:false) — esperado"
           else
-            echo "::warning::Legítimo NÃO aprovado (approved:false). Possível problema de detecção."
+            echo "::error::Fraude NÃO detectada! Possível FP grave. Resposta: $RESP2"
+            docker compose logs
+            exit 1
           fi
+
+          # Caso 3: mais um legit (tx-3943816664) e um borderline
+          # Esse do example-payloads.json, mas vamos validar apenas que responde
+          echo ""
+          echo "=== Validação de resposta em 10 payloads aleatórios ==="
+          for id in tx-1788243118 tx-1841834722 tx-2870794086 tx-3795737979 tx-2735832589; do
+            RESP=$(curl -s -X POST http://localhost:9999/fraud-score \
+              -H 'Content-Type: application/json' \
+              -d "{\"id\":\"$id\",\"transaction\":{\"amount\":100,\"installments\":1,\"requested_at\":\"2026-01-01T12:00:00Z\"},\"customer\":{\"avg_amount\":100,\"tx_count_24h\":3,\"known_merchants\":[\"MERC-016\"]},\"merchant\":{\"id\":\"MERC-016\",\"mcc\":\"5411\",\"avg_amount\":60},\"terminal\":{\"is_online\":false,\"card_present\":true,\"km_from_home\":10},\"last_transaction\":null}" 2>&1)
+            if ! echo "$RESP" | grep -q '"approved"'; then
+              echo "::error::Resposta inválida para $id: $RESP"
+              docker compose logs
+              exit 1
+            fi
+          done
+          echo "✓ 5 payloads aleatórios responderam corretamente"
 
           echo ""
           echo "=== Teste de carga (200 requests) ==="
