@@ -195,17 +195,18 @@ jobs:
           echo "✓ 10 payloads variados responderam corretamente ($FAIL_COUNT falhas toleradas)"
 
           echo ""
-          echo "=== Teste de carga (500 requests) com timeout 2s ==="
+          echo "=== Teste de carga (1000 requests paralelos) com timeout 2.001s ==="
           HTTP_500=0
           HTTP_4XX=0
           HTTP_TIMEOUT=0
           > /tmp/codes.txt
-          for batch in $(seq 1 25); do
+          for batch in $(seq 1 50); do
             for i in $(seq 1 20); do
               (
-                # -m 2: timeout de 2s. Se API demorar mais, curl retorna exit code 28.
+                # -m 2.001: timeout exato do bot (2.001ms, não 2s).
+                # Se API demorar mais, curl retorna exit code 28.
                 # Isso detecta regressões de performance (p99 > 2s causaria corte no bot).
-                CODE=$(curl -s -m 2 -X POST http://localhost:9999/fraud-score \
+                CODE=$(curl -s -m 2.001 -X POST http://localhost:9999/fraud-score \
                   -H 'Content-Type: application/json' \
                   -d '{"id":"t","transaction":{"amount":100,"installments":1,"requested_at":"2026-01-01T12:00:00Z"},"customer":{"avg_amount":100,"tx_count_24h":10,"known_merchants":[]},"merchant":{"id":"m","mcc":"5411","avg_amount":100},"terminal":{"is_online":false,"card_present":true,"km_from_home":5},"last_transaction":{"timestamp":"2025-12-31T10:00:00Z","km_from_current":5}}' \
                   -o /dev/null -w "%{http_code}" 2>&1)
@@ -226,14 +227,14 @@ jobs:
           HTTP_4XX=${HTTP_4XX:-0}
           HTTP_TIMEOUT=$(grep -c "TIMEOUT" /tmp/codes.txt 2>/dev/null | head -1)
           HTTP_TIMEOUT=${HTTP_TIMEOUT:-0}
-          echo "Total: $TOTAL, HTTP 5xx: $HTTP_500, HTTP 4xx: $HTTP_4XX, Timeouts(>2s): $HTTP_TIMEOUT"
-          if [ "$HTTP_500" -gt 25 ]; then
+          echo "Total: $TOTAL, HTTP 5xx: $HTTP_500, HTTP 4xx: $HTTP_4XX, Timeouts(>2.001s): $HTTP_TIMEOUT"
+          if [ "$HTTP_500" -gt 50 ]; then
             echo "FALHOU: $HTTP_500 erros 5xx em $TOTAL (5%+)"
             docker compose logs
             exit 1
           fi
-          if [ "$HTTP_TIMEOUT" -gt 12 ]; then
-            echo "::error::$HTTP_TIMEOUT timeouts (>2s) em $TOTAL (2.5%+) — API muito lenta!"
+          if [ "$HTTP_TIMEOUT" -gt 25 ]; then
+            echo "::error::$HTTP_TIMEOUT timeouts (>2.001s) em $TOTAL (2.5%+) — API muito lenta!"
             docker compose logs
             exit 1
           fi
@@ -242,11 +243,11 @@ jobs:
           fi
 
           echo ""
-          echo "=== Medir p99 (500 sequenciais) com timeout 2s ==="
+          echo "=== Medir p99 (1000 sequenciais) com timeout 2.001s ==="
           > /tmp/latencies.txt
-          for i in $(seq 1 500); do
-            # -m 2: timeout. Se > 2s, registra como -1 (timeout) e não conta pro p99.
-            T=$(curl -s -m 2 -X POST http://localhost:9999/fraud-score \
+          for i in $(seq 1 1000); do
+            # -m 2.001: timeout exato do bot. Se > 2.001s, registra como -1.
+            T=$(curl -s -m 2.001 -X POST http://localhost:9999/fraud-score \
               -H 'Content-Type: application/json' \
               -d '{"id":"t","transaction":{"amount":100,"installments":1,"requested_at":"2026-01-01T12:00:00Z"},"customer":{"avg_amount":100,"tx_count_24h":10,"known_merchants":[]},"merchant":{"id":"m","mcc":"5411","avg_amount":100},"terminal":{"is_online":false,"card_present":true,"km_from_home":5},"last_transaction":{"timestamp":"2025-12-31T10:00:00Z","km_from_current":5}}' \
               -o /dev/null -w "%{time_total}" 2>&1) || true
@@ -288,21 +289,22 @@ jobs:
             echo "::error::p99 = ${P99_MS}ms (acima de 10ms, perde pontos no bot!)"
             exit 1
           fi
-          if [ "$TIME_OUTS" -gt 12 ]; then
-            echo "::error::$TIME_OUTS timeouts (>2s) em 500 (2.5%+) — performance muito degradada"
+          if [ "$TIME_OUTS" -gt 25 ]; then
+            echo "::error::$TIME_OUTS timeouts (>2.001s) em 1000 (2.5%+) — performance muito degradada"
             exit 1
           fi
 
           echo ""
-          echo "=== Teste de carga SUSTENTADA 60s @ ~40 RPS (mais próximo do bot) ==="
+          echo "=== Teste de carga SUSTENTADA 120s @ ~41 RPS (IGUAL AO BOT) ==="
+          echo "Bot oficial: 5.000 requests em 120s = ~41 RPS, timeout 2.001ms"
           echo "Detecta: race conditions, memory leaks, flakiness, saturation effects"
           echo "Load atual antes da carga: $(cat /proc/loadavg | awk '{print $1}')"
           > /tmp/sust_codes.txt
-          END_TS=$(( $(date +%s) + 60 ))
+          END_TS=$(( $(date +%s) + 120 ))
           REQ_COUNT=0
           ERR_COUNT=0
           while [ $(date +%s) -lt $END_TS ]; do
-            RESP=$(curl -s -m 2 -X POST http://localhost:9999/fraud-score \
+            RESP=$(curl -s -m 2.001 -X POST http://localhost:9999/fraud-score \
               -H 'Content-Type: application/json' \
               -d '{"id":"t","transaction":{"amount":100,"installments":1,"requested_at":"2026-01-01T12:00:00Z"},"customer":{"avg_amount":100,"tx_count_24h":10,"known_merchants":[]},"merchant":{"id":"m","mcc":"5411","avg_amount":100},"terminal":{"is_online":false,"card_present":true,"km_from_home":5},"last_transaction":{"timestamp":"2025-12-31T10:00:00Z","km_from_current":5}}' \
               -o /dev/null -w "%{http_code}" 2>&1) || true
@@ -314,18 +316,23 @@ jobs:
             elif [ "${RESP:0:1}" = "5" ]; then
               ERR_COUNT=$((ERR_COUNT + 1))
             fi
-            # Throttle to ~40 RPS
-            sleep 0.025
+            # Throttle to ~41 RPS (igual ao bot: 5000/120 = 41.67)
+            sleep 0.024
           done
-          echo "Sustained: $REQ_COUNT requests em 60s, $ERR_COUNT timeouts/erros 5xx"
+          echo "Sustained: $REQ_COUNT requests em 120s, $ERR_COUNT timeouts/erros 5xx"
           echo "Load após carga: $(cat /proc/loadavg | awk '{print $1}')"
           if [ "$ERR_COUNT" -gt "$((REQ_COUNT / 20))" ]; then
-            echo "::error::$ERR_COUNT erros em $REQ_COUNT (>5%) — degradação severa"
+            echo "::error::$ERR_COUNT erros em $REQ_COUNT (>5%) — degradação severa (corte no bot!)"
             docker compose logs
             exit 1
           fi
-          if [ "$REQ_COUNT" -lt 2000 ]; then
-            echo "::warning::Só $REQ_COUNT requests em 60s (< 33 RPS, throttled)"
+          if [ "$REQ_COUNT" -lt 4500 ]; then
+            echo "::warning::Só $REQ_COUNT requests em 120s (< 37 RPS, throttled — bot faria 5000)"
+          fi
+          if [ "$REQ_COUNT" -lt 3000 ]; then
+            echo "::error::Só $REQ_COUNT requests em 120s (< 25 RPS) — API muito lenta para o bot!"
+            docker compose logs
+            exit 1
           fi
 
           echo ""
@@ -364,6 +371,64 @@ jobs:
             docker compose logs
             exit 1
           fi
+
+          echo ""
+          echo "=== Análise de latência (similar ao replay.rs do top 1) ==="
+          echo "Detecta queries lentas (cauda algorítmica vs ambiental)"
+          python3 << 'PYEOF'
+import sys
+
+latencies = []
+try:
+    with open('/tmp/latencies_clean.txt') as f:
+        for line in f:
+            try:
+                latencies.append(float(line.strip()) * 1000)  # em ms
+            except ValueError:
+                pass
+except FileNotFoundError:
+    pass
+
+if not latencies:
+    print("(sem dados)")
+    sys.exit(0)
+
+latencies.sort()
+n = len(latencies)
+p50 = latencies[n // 2]
+p90 = latencies[int(n * 0.9)]
+p95 = latencies[int(n * 0.95)]
+p99 = latencies[int(n * 0.99)]
+p999 = latencies[int(n * 0.999)] if n > 10 else p99
+max_lat = latencies[-1]
+jitter = max_lat - latencies[0]
+mean = sum(latencies) / n
+
+print(f"Total: {n} latências válidas")
+print(f"  p50:   {p50:.3f} ms")
+print(f"  p90:   {p90:.3f} ms")
+print(f"  p95:   {p95:.3f} ms")
+print(f"  p99:   {p99:.3f} ms")
+print(f"  p99.9: {p999:.3f} ms")
+print(f"  max:   {max_lat:.3f} ms")
+print(f"  mean:  {mean:.3f} ms")
+print(f"  jitter (max - min): {jitter:.3f} ms")
+
+# Classifica queries lentas (similar ao top 1)
+# Se p99 > 3x p50, há cauda algorítmica (queries problemáticas)
+if p50 > 0 and p99 > 3 * p50:
+    print(f"  ⚠️  CAUDA ALGORÍTMICA: p99 ({p99:.2f}ms) > 3x p50 ({p50:.2f}ms)")
+    print(f"     Algumas queries são significativamente mais lentas que outras")
+else:
+    print(f"  ✓ Distribuição uniforme (p99 ≤ 3x p50)")
+
+# Verifica limite do bot: p99 > 1ms = perde pontos
+if p99 > 1.0:
+    lost = int(1000 * (3 - p99) if p99 < 3 else 0)  # estimativa simplificada
+    print(f"  ⚠️  p99 > 1ms: perde pontos no score_p99 (saturaria em 1ms)")
+elif p99 > 0.5:
+    print(f"  ✓ p99 ≤ 1ms: score_p99 saturado em 3000 (melhor caso)")
+PYEOF
 
           echo ""
           echo "=== Cleanup ==="
