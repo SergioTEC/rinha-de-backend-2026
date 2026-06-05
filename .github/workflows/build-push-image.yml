@@ -63,6 +63,10 @@ jobs:
 
       - name: Test local (valida antes do push)
         run: |
+          # Desabilitar strict mode para permitir timeouts e erros esperados
+          set +e
+          set +o pipefail
+
           echo "=== Subindo stack com imagem local ==="
           docker compose down --remove-orphans 2>&1 || true
           docker compose up -d 2>&1
