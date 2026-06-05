@@ -194,42 +194,52 @@ jobs:
 
           echo ""
           echo "=== Medir p99 (200 sequenciais) com timeout 2s ==="
+          set +e  # Allow curl to timeout without aborting the script
           > /tmp/latencies.txt
           for i in $(seq 1 200); do
             # -m 2: timeout. Se > 2s, registra como -1 (timeout) e não conta pro p99.
+            # || echo "TIMEOUT" fallback to avoid empty $T (which would also fail -n check).
             T=$(curl -s -m 2 -X POST http://localhost:9999/fraud-score \
               -H 'Content-Type: application/json' \
               -d '{"id":"t","transaction":{"amount":100,"installments":1,"requested_at":"2026-01-01T12:00:00Z"},"customer":{"avg_amount":100,"tx_count_24h":10,"known_merchants":[]},"merchant":{"id":"m","mcc":"5411","avg_amount":100},"terminal":{"is_online":false,"card_present":true,"km_from_home":5},"last_transaction":{"timestamp":"2025-12-31T10:00:00Z","km_from_current":5}}' \
-              -o /dev/null -w "%{time_total}" 2>&1)
-            if [ -n "$T" ]; then
+              -o /dev/null -w "%{time_total}" 2>&1 || echo "TIMEOUT")
+            if [ -n "$T" ] && [ "$T" != "TIMEOUT" ]; then
               echo "$T" >> /tmp/latencies.txt
             else
               echo "-1" >> /tmp/latencies.txt
             fi
           done
-          # Remove timeouts
-          grep -v "^-1$" /tmp/latencies.txt | sort -n > /tmp/latencies_clean.txt
-          P50_MS=$(awk -v p=$(awk 'NR==50' /tmp/latencies_clean.txt) 'BEGIN{print int(p*1000)}')
-          P95_MS=$(awk -v p=$(awk 'NR==95' /tmp/latencies_clean.txt) 'BEGIN{print int(p*1000)}')
-          P99_MS=$(awk -v p=$(awk 'NR==99' /tmp/latencies_clean.txt) 'BEGIN{print int(p*1000)}')
-          TIME_OUTS=$(grep -c "^-1$" /tmp/latencies.txt)
-          VALID=$(wc -l < /tmp/latencies_clean.txt)
-          echo "Latências (ms): p50=$P50_MS  p95=$P95_MS  p99=$P99_MS  [valid=$VALID timeouts=$TIME_OUTS]"
-          if [ "$P99_MS" -gt 50 ]; then
-            echo "::warning::p99 = ${P99_MS}ms (acima de 50ms, regressão!)"
-          fi
-          if [ "$P99_MS" -gt 200 ]; then
-            echo "::error::p99 = ${P99_MS}ms (acima de 200ms, CORTE no bot!)"
-            exit 1
-          fi
-          if [ "$TIME_OUTS" -gt 5 ]; then
-            echo "::error::$TIME_OUTS timeouts (>2s) em 200 (2.5%+) — performance muito degradada"
-            exit 1
-          fi
+          set -e
+          # Use python for robust percentile calculation (no awk subshell issues).
+          python3 -c "
+import sys
+times = []
+with open('/tmp/latencies.txt') as f:
+    for line in f:
+        v = line.strip()
+        if v and v != '-1' and v != 'TIMEOUT':
+            try:
+                times.append(float(v))
+            except ValueError:
+                pass
+times.sort()
+n = len(times)
+timeouts = sum(1 for line in open('/tmp/latencies.txt') if line.strip() in ('-1', 'TIMEOUT'))
+print(f'Latências (ms): p50={int(times[n//2]*1000) if n>0 else 0}  p95={int(times[int(n*0.95)]*1000) if n>5 else 0}  p99={int(times[int(n*0.99)]*1000) if n>2 else 0}  [valid={n} timeouts={timeouts}]', flush=True)
+if n > 2 and times[int(n*0.99)] > 0.200:
+    print(f'::error::p99 = {int(times[int(n*0.99)]*1000)}ms (acima de 200ms, CORTE no bot!)', flush=True)
+    sys.exit(1)
+elif n > 2 and times[int(n*0.99)] > 0.050:
+    print(f'::warning::p99 = {int(times[int(n*0.99)]*1000)}ms (acima de 50ms, regressão!)', flush=True)
+if timeouts > 5:
+    print(f'::error::{timeouts} timeouts (>2s) em 200 (2.5%+) — performance muito degradada', flush=True)
+    sys.exit(1)
+"
 
           echo ""
           echo "=== Teste de carga SUSTENTADA 30s @ ~50 RPS (simula 2 min @ 900 RPS em escala) ==="
           echo "Detecta: race conditions, memory leaks, flakiness, saturation effects"
+          set +e  # Allow curl to timeout without aborting the script
           > /tmp/sust_codes.txt
           END_TS=$(( $(date +%s) + 30 ))
           REQ_COUNT=0
@@ -238,7 +248,7 @@ jobs:
             RESP=$(curl -s -m 2 -X POST http://localhost:9999/fraud-score \
               -H 'Content-Type: application/json' \
               -d '{"id":"t","transaction":{"amount":100,"installments":1,"requested_at":"2026-01-01T12:00:00Z"},"customer":{"avg_amount":100,"tx_count_24h":10,"known_merchants":[]},"merchant":{"id":"m","mcc":"5411","avg_amount":100},"terminal":{"is_online":false,"card_present":true,"km_from_home":5},"last_transaction":{"timestamp":"2025-12-31T10:00:00Z","km_from_current":5}}' \
-              -o /dev/null -w "%{http_code}" 2>&1)
+              -o /dev/null -w "%{http_code}" 2>&1 || echo "000")
             REQ_COUNT=$((REQ_COUNT + 1))
             # Timeouts (curl exit 28) aparecem como "000" no http_code
             if [ "${RESP:0:3}" = "000" ]; then
@@ -249,6 +259,7 @@ jobs:
             # Throttle to ~50 RPS
             sleep 0.02
           done
+          set -e
           echo "Sustained: $REQ_COUNT requests em 30s, $ERR_COUNT timeouts/erros 5xx"
           if [ "$ERR_COUNT" -gt "$((REQ_COUNT / 20))" ]; then
             echo "::error::$ERR_COUNT erros em $REQ_COUNT (>5%) — degradação severa"
