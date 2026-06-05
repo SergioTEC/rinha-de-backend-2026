@@ -107,13 +107,27 @@ fn main() {
     println!("[build-index] Cell stats: min={}, max={}, avg={}, empty={}", 
         min_size, max_size, avg_size, empty_cells);
 
+    // Compute bounding boxes (min/max per dimension per cell) for lower bound pruning
+    println!("[build-index] Computing bounding boxes...");
+    let mut bbox_min: Vec<[i16; DIMS]> = vec![[i16::MAX; DIMS]; NUM_CELLS];
+    let mut bbox_max: Vec<[i16; DIMS]> = vec![[i16::MIN; DIMS]; NUM_CELLS];
+    for c in 0..NUM_CELLS {
+        for &idx in &cells[c] {
+            for d in 0..DIMS {
+                let v = vectors[idx][d];
+                if v < bbox_min[c][d] { bbox_min[c][d] = v; }
+                if v > bbox_max[c][d] { bbox_max[c][d] = v; }
+            }
+        }
+    }
+
     // Save binary
     println!("[build-index] Saving to {}...", out_path);
     let out = File::create(out_path).expect("Failed to create output");
     let mut writer = BufWriter::new(out);
     
-    // Header
-    writer.write_all(b"RINHA06\x02").unwrap();
+    // Header - version 3 adds bounding boxes for lower bound pruning
+    writer.write_all(b"RINHA06\x03").unwrap();
     writer.write_all(&(n as u32).to_le_bytes()).unwrap();
     writer.write_all(&(DIMS as u16).to_le_bytes()).unwrap();
     writer.write_all(&(NUM_CELLS as u32).to_le_bytes()).unwrap();
@@ -122,6 +136,18 @@ fn main() {
     for c in 0..NUM_CELLS {
         for d in 0..DIMS {
             writer.write_all(&centroids[c][d].to_le_bytes()).unwrap();
+        }
+    }
+    
+    // Bounding boxes (new in v3) - used for lower bound pruning in IVF
+    for c in 0..NUM_CELLS {
+        for d in 0..DIMS {
+            writer.write_all(&bbox_min[c][d].to_le_bytes()).unwrap();
+        }
+    }
+    for c in 0..NUM_CELLS {
+        for d in 0..DIMS {
+            writer.write_all(&bbox_max[c][d].to_le_bytes()).unwrap();
         }
     }
     

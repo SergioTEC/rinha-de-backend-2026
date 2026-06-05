@@ -3,6 +3,7 @@
 // MEMORY OPTIMIZED: single contiguous array instead of Vec<Vec<i16>>
 
 use std::fs::File;
+use crate::ivf::distance_i16;
 
 /// Number of dimensions per vector
 pub const DIMS: usize = 14;
@@ -21,6 +22,10 @@ pub struct Dataset {
     pub labels: Vec<u8>,
     /// IVF centroids: [cell_count][DIMS] - kept as Vec for flexibility
     pub centroids: Vec<[i16; DIMS]>,
+    /// Bounding box min per cell per dim (v3 only). Used for lower bound pruning.
+    pub bbox_min: Vec<[i16; DIMS]>,
+    /// Bounding box max per cell per dim (v3 only). Used for lower bound pruning.
+    pub bbox_max: Vec<[i16; DIMS]>,
     /// Cell metadata: (offset, len) into cell_indices
     pub cell_meta: Vec<(u32, u32)>,
     /// Flattened cell indices: all vectors grouped by cell (u32 to save memory)
@@ -37,6 +42,8 @@ impl Dataset {
             num_cells: 0,
             labels: Vec::new(),
             centroids: Vec::new(),
+            bbox_min: Vec::new(),
+            bbox_max: Vec::new(),
             cell_meta: Vec::new(),
             cell_indices: Vec::new(),
             dims: Vec::new(),
@@ -76,8 +83,17 @@ impl Dataset {
         let data = &mmap[..];
         
         // Parse header
-        if data.len() < 18 || &data[0..8] != b"RINHA06\x02" {
-            panic!("Invalid index file format (expected version 2)");
+        if data.len() < 18 {
+            panic!("Invalid index file format (too small)");
+        }
+        if &data[0..8] != b"RINHA06\x02" && &data[0..8] != b"RINHA06\x03" {
+            panic!("Invalid index file format (expected RINHA06 v2 or v3)");
+        }
+        let has_bbox = &data[0..8] == b"RINHA06\x03";
+        if has_bbox {
+            println!("[Dataset] v3 format: bounding boxes present");
+        } else {
+            println!("[Dataset] v2 format: no bounding boxes (lower bound pruning disabled)");
         }
         
         let count = u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
@@ -102,6 +118,28 @@ impl Dataset {
             centroids.push(vec);
         }
         offset += centroids_size;
+        
+        // Read bounding boxes (v3 only)
+        let mut bbox_min: Vec<[i16; DIMS]> = Vec::new();
+        let mut bbox_max: Vec<[i16; DIMS]> = Vec::new();
+        if has_bbox {
+            bbox_min = vec![[0i16; DIMS]; num_cells];
+            bbox_max = vec![[0i16; DIMS]; num_cells];
+            for c in 0..num_cells {
+                for d in 0..DIMS {
+                    let idx = offset + (c * DIMS + d) * 2;
+                    bbox_min[c][d] = i16::from_le_bytes([data[idx], data[idx + 1]]);
+                }
+            }
+            offset += num_cells * DIMS * 2;
+            for c in 0..num_cells {
+                for d in 0..DIMS {
+                    let idx = offset + (c * DIMS + d) * 2;
+                    bbox_max[c][d] = i16::from_le_bytes([data[idx], data[idx + 1]]);
+                }
+            }
+            offset += num_cells * DIMS * 2;
+        }
         
         // Read labels as u8 (1 byte each, 0 or 1)
         let mut labels: Vec<u8> = Vec::with_capacity(count);
@@ -145,13 +183,38 @@ impl Dataset {
                  cell_indices.len() * std::mem::size_of::<u32>() / 1024,
                  dims.len() * std::mem::size_of::<i16>() / 1024);
         
-        Self { count, num_cells, labels, centroids, cell_meta, cell_indices, dims }
+        Self { count, num_cells, labels, centroids, bbox_min, bbox_max, cell_meta, cell_indices, dims }
     }
 
     /// Get a single dimension value for a vector
     #[inline(always)]
     pub fn dim(&self, dim_idx: usize, vec_idx: usize) -> i16 {
         self.dims[dim_idx * self.count + vec_idx]
+    }
+
+    /// Compute lower bound on L2 squared distance from query to any vector in a cell.
+    /// Uses bounding box: LB = sum_d max(0, query[d] - bbox_max[d])^2 + max(0, bbox_min[d] - query[d])^2.
+    /// If bbox is not available (v2), returns distance to centroid as fallback.
+    /// Returns i64::MAX if cell has no vectors.
+    #[inline(always)]
+    pub fn lower_bound(&self, query: &[i16; DIMS], cell_idx: usize) -> i64 {
+        let (offset, len) = self.cell_meta[cell_idx];
+        if len == 0 {
+            return i64::MAX;
+        }
+        if self.bbox_min.is_empty() {
+            // v2 fallback: use distance to centroid
+            return distance_i16(query, &self.centroids[cell_idx]);
+        }
+        let mut acc: i64 = 0;
+        for d in 0..DIMS {
+            let qd = query[d] as i64;
+            let lo = self.bbox_min[cell_idx][d] as i64;
+            let hi = self.bbox_max[cell_idx][d] as i64;
+            let diff = if qd < lo { lo - qd } else if qd > hi { qd - hi } else { 0 };
+            acc += diff * diff;
+        }
+        acc
     }
 
     /// Compute L2 distance between a query vector and a reference vector.

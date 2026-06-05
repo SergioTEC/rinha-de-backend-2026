@@ -154,6 +154,17 @@ impl IVFIndex {
                 break;
             }
 
+            // Lower bound pruning using bounding box (when available).
+            // The bounding box gives a TIGHTER bound than centroid distance
+            // because it considers min/max per dimension, not just the centroid.
+            // If LB >= k-th neighbor, this cell cannot contain a better vector.
+            if best_len == k {
+                let lb = ds.lower_bound(query, cidx);
+                if lb >= best[k - 1].0 {
+                    continue;
+                }
+            }
+
             let (offset, len) = ds.cell_meta[cidx];
             for i in 0..len {
                 let vidx = ds.cell_indices[(offset + i) as usize] as usize;
