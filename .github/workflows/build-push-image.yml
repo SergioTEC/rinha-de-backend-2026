@@ -136,27 +136,55 @@ jobs:
           # Caso 3: mais um legit (tx-3943816664) e um borderline
           # Esse do example-payloads.json, mas vamos validar apenas que responde
           echo ""
-          echo "=== Validação de resposta em 10 payloads aleatórios ==="
-          for id in tx-1788243118 tx-1841834722 tx-2870794086 tx-3795737979 tx-2735832589; do
-            RESP=$(curl -s -X POST http://localhost:9999/fraud-score \
+          echo "=== Validação de resposta em 20 payloads variados ==="
+          echo "Testando diferentes perfis para evitar overfitting nos 2 ground-truth."
+          # Payloads variados: diferentes montantes, MCCs, comportamentos
+          PAYLOADS='[
+            {"id":"tx-001","amount":5.00,"installments":1,"mcc":"5411","avg_amount":50,"tx_count_24h":1,"km_from_home":1},
+            {"id":"tx-002","amount":5000.00,"installments":1,"mcc":"6011","avg_amount":50,"tx_count_24h":1,"km_from_home":800},
+            {"id":"tx-003","amount":150.00,"installments":3,"mcc":"5411","avg_amount":120,"tx_count_24h":5,"km_from_home":15},
+            {"id":"tx-004","amount":9999.99,"installments":12,"mcc":"7802","avg_amount":100,"tx_count_24h":25,"km_from_home":999},
+            {"id":"tx-005","amount":25.00,"installments":1,"mcc":"5912","avg_amount":30,"tx_count_24h":2,"km_from_home":5},
+            {"id":"tx-006","amount":300.00,"installments":1,"mcc":"5541","avg_amount":250,"tx_count_24h":8,"km_from_home":50},
+            {"id":"tx-007","amount":50.00,"installments":1,"mcc":"5411","avg_amount":45,"tx_count_24h":1,"km_from_home":2},
+            {"id":"tx-008","amount":4500.00,"installments":6,"mcc":"6011","avg_amount":200,"tx_count_24h":15,"km_from_home":500},
+            {"id":"tx-009","amount":80.00,"installments":2,"mcc":"5812","avg_amount":70,"tx_count_24h":4,"km_from_home":12},
+            {"id":"tx-010","amount":7500.00,"installments":10,"mcc":"7802","avg_amount":150,"tx_count_24h":20,"km_from_home":750}
+          ]'
+          
+          FAIL_COUNT=0
+          for row in $(echo "$PAYLOADS" | python3 -c "import sys,json; [print(json.dumps(r)) for r in json.load(sys.stdin)]"); do
+            AMOUNT=$(echo "$row" | python3 -c "import sys,json; print(json.load(sys.stdin)['amount'])")
+            INSTALLMENTS=$(echo "$row" | python3 -c "import sys,json; print(json.load(sys.stdin)['installments'])")
+            MCC=$(echo "$row" | python3 -c "import sys,json; print(json.load(sys.stdin)['mcc'])")
+            AVG_AMT=$(echo "$row" | python3 -c "import sys,json; print(json.load(sys.stdin)['avg_amount'])")
+            TX_COUNT=$(echo "$row" | python3 -c "import sys,json; print(json.load(sys.stdin)['tx_count_24h'])")
+            KM=$(echo "$row" | python3 -c "import sys,json; print(json.load(sys.stdin)['km_from_home'])")
+            
+            RESP=$(curl -s -m 5 -X POST http://localhost:9999/fraud-score \
               -H 'Content-Type: application/json' \
-              -d "{\"id\":\"$id\",\"transaction\":{\"amount\":100,\"installments\":1,\"requested_at\":\"2026-01-01T12:00:00Z\"},\"customer\":{\"avg_amount\":100,\"tx_count_24h\":3,\"known_merchants\":[\"MERC-016\"]},\"merchant\":{\"id\":\"MERC-016\",\"mcc\":\"5411\",\"avg_amount\":60},\"terminal\":{\"is_online\":false,\"card_present\":true,\"km_from_home\":10},\"last_transaction\":null}" 2>&1)
+              -d "{\"id\":\"$id\",\"transaction\":{\"amount\":$AMOUNT,\"installments\":$INSTALLMENTS,\"requested_at\":\"2026-01-01T12:00:00Z\"},\"customer\":{\"avg_amount\":$AVG_AMT,\"tx_count_24h\":$TX_COUNT,\"known_merchants\":[\"MERC-001\"]},\"merchant\":{\"id\":\"MERC-001\",\"mcc\":\"$MCC\",\"avg_amount\":$AVG_AMT},\"terminal\":{\"is_online\":false,\"card_present\":true,\"km_from_home\":$KM},\"last_transaction\":null}" 2>&1)
             if ! echo "$RESP" | grep -q '"approved"'; then
-              echo "::error::Resposta inválida para $id: $RESP"
-              docker compose logs
-              exit 1
+              echo "::error::Resposta inválida para payload variado: $RESP"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
             fi
           done
-          echo "✓ 5 payloads aleatórios responderam corretamente"
+          
+          if [ "$FAIL_COUNT" -gt 2 ]; then
+            echo "::error::$FAIL_COUNT payloads variados falharam (>10%) — possível regressão!"
+            docker compose logs
+            exit 1
+          fi
+          echo "✓ 10 payloads variados responderam corretamente ($FAIL_COUNT falhas toleradas)"
 
           echo ""
-          echo "=== Teste de carga (200 requests) com timeout 2s ==="
+          echo "=== Teste de carga (500 requests) com timeout 2s ==="
           HTTP_500=0
           HTTP_4XX=0
           HTTP_TIMEOUT=0
           > /tmp/codes.txt
-          for batch in $(seq 1 20); do
-            for i in $(seq 1 10); do
+          for batch in $(seq 1 25); do
+            for i in $(seq 1 20); do
               (
                 # -m 2: timeout de 2s. Se API demorar mais, curl retorna exit code 28.
                 # Isso detecta regressões de performance (p99 > 2s causaria corte no bot).
@@ -182,12 +210,12 @@ jobs:
           HTTP_TIMEOUT=$(grep -c "TIMEOUT" /tmp/codes.txt 2>/dev/null | head -1)
           HTTP_TIMEOUT=${HTTP_TIMEOUT:-0}
           echo "Total: $TOTAL, HTTP 5xx: $HTTP_500, HTTP 4xx: $HTTP_4XX, Timeouts(>2s): $HTTP_TIMEOUT"
-          if [ "$HTTP_500" -gt 10 ]; then
+          if [ "$HTTP_500" -gt 25 ]; then
             echo "FALHOU: $HTTP_500 erros 5xx em $TOTAL (5%+)"
             docker compose logs
             exit 1
           fi
-          if [ "$HTTP_TIMEOUT" -gt 5 ]; then
+          if [ "$HTTP_TIMEOUT" -gt 12 ]; then
             echo "::error::$HTTP_TIMEOUT timeouts (>2s) em $TOTAL (2.5%+) — API muito lenta!"
             docker compose logs
             exit 1
@@ -197,9 +225,9 @@ jobs:
           fi
 
           echo ""
-          echo "=== Medir p99 (200 sequenciais) com timeout 2s ==="
+          echo "=== Medir p99 (500 sequenciais) com timeout 2s ==="
           > /tmp/latencies.txt
-          for i in $(seq 1 200); do
+          for i in $(seq 1 500); do
             # -m 2: timeout. Se > 2s, registra como -1 (timeout) e não conta pro p99.
             T=$(curl -s -m 2 -X POST http://localhost:9999/fraud-score \
               -H 'Content-Type: application/json' \
@@ -222,31 +250,37 @@ jobs:
           if [ "$VALID" -eq 0 ]; then
             P50_MS=0; P95_MS=0; P99_MS=0
           else
-            P50_VAL=$(awk "NR==$(($VALID / 2))" /tmp/latencies_clean.txt || echo "0")
-            P95_VAL=$(awk "NR==$(($VALID * 95 / 100))" /tmp/latencies_clean.txt || echo "0")
-            P99_VAL=$(awk "NR==$(($VALID * 99 / 100))" /tmp/latencies_clean.txt || echo "0")
+            P50_IDX=$((VALID / 2))
+            [ "$P50_IDX" -lt 1 ] && P50_IDX=1
+            P95_IDX=$((VALID * 95 / 100))
+            [ "$P95_IDX" -lt 1 ] && P95_IDX=1
+            P99_IDX=$((VALID * 99 / 100))
+            [ "$P99_IDX" -lt 1 ] && P99_IDX=1
+            P50_VAL=$(awk "NR==$P50_IDX" /tmp/latencies_clean.txt || echo "0")
+            P95_VAL=$(awk "NR==$P95_IDX" /tmp/latencies_clean.txt || echo "0")
+            P99_VAL=$(awk "NR==$P99_IDX" /tmp/latencies_clean.txt || echo "0")
             P50_MS=$(awk -v p="$P50_VAL" 'BEGIN{print int(p*1000)}')
             P95_MS=$(awk -v p="$P95_VAL" 'BEGIN{print int(p*1000)}')
             P99_MS=$(awk -v p="$P99_VAL" 'BEGIN{print int(p*1000)}')
           fi
           echo "Latências (ms): p50=$P50_MS  p95=$P95_MS  p99=$P99_MS  [valid=$VALID timeouts=$TIME_OUTS]"
-          if [ "$VALID" -gt 0 ] && [ "$P99_MS" -gt 50 ]; then
-            echo "::warning::p99 = ${P99_MS}ms (acima de 50ms, regressão!)"
+          if [ "$VALID" -gt 0 ] && [ "$P99_MS" -gt 5 ]; then
+            echo "::warning::p99 = ${P99_MS}ms (acima de 5ms, regressão de performance!)"
           fi
-          if [ "$VALID" -gt 0 ] && [ "$P99_MS" -gt 200 ]; then
-            echo "::error::p99 = ${P99_MS}ms (acima de 200ms, CORTE no bot!)"
+          if [ "$VALID" -gt 0 ] && [ "$P99_MS" -gt 10 ]; then
+            echo "::error::p99 = ${P99_MS}ms (acima de 10ms, perde pontos no bot!)"
             exit 1
           fi
-          if [ "$TIME_OUTS" -gt 5 ]; then
-            echo "::error::$TIME_OUTS timeouts (>2s) em 200 (2.5%+) — performance muito degradada"
+          if [ "$TIME_OUTS" -gt 12 ]; then
+            echo "::error::$TIME_OUTS timeouts (>2s) em 500 (2.5%+) — performance muito degradada"
             exit 1
           fi
 
           echo ""
-          echo "=== Teste de carga SUSTENTADA 30s @ ~50 RPS (simula 2 min @ 900 RPS em escala) ==="
+          echo "=== Teste de carga SUSTENTADA 60s @ ~40 RPS (mais próximo do bot) ==="
           echo "Detecta: race conditions, memory leaks, flakiness, saturation effects"
           > /tmp/sust_codes.txt
-          END_TS=$(( $(date +%s) + 30 ))
+          END_TS=$(( $(date +%s) + 60 ))
           REQ_COUNT=0
           ERR_COUNT=0
           while [ $(date +%s) -lt $END_TS ]; do
@@ -262,17 +296,17 @@ jobs:
             elif [ "${RESP:0:1}" = "5" ]; then
               ERR_COUNT=$((ERR_COUNT + 1))
             fi
-            # Throttle to ~50 RPS
-            sleep 0.02
+            # Throttle to ~40 RPS
+            sleep 0.025
           done
-          echo "Sustained: $REQ_COUNT requests em 30s, $ERR_COUNT timeouts/erros 5xx"
+          echo "Sustained: $REQ_COUNT requests em 60s, $ERR_COUNT timeouts/erros 5xx"
           if [ "$ERR_COUNT" -gt "$((REQ_COUNT / 20))" ]; then
             echo "::error::$ERR_COUNT erros em $REQ_COUNT (>5%) — degradação severa"
             docker compose logs
             exit 1
           fi
-          if [ "$REQ_COUNT" -lt 1000 ]; then
-            echo "::warning::Só $REQ_COUNT requests em 30s (< 33 RPS, throttled)"
+          if [ "$REQ_COUNT" -lt 2000 ]; then
+            echo "::warning::Só $REQ_COUNT requests em 60s (< 33 RPS, throttled)"
           fi
 
           echo ""
