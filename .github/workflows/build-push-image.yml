@@ -200,7 +200,7 @@ jobs:
             T=$(curl -s -m 2 -X POST http://localhost:9999/fraud-score \
               -H 'Content-Type: application/json' \
               -d '{"id":"t","transaction":{"amount":100,"installments":1,"requested_at":"2026-01-01T12:00:00Z"},"customer":{"avg_amount":100,"tx_count_24h":10,"known_merchants":[]},"merchant":{"id":"m","mcc":"5411","avg_amount":100},"terminal":{"is_online":false,"card_present":true,"km_from_home":5},"last_transaction":{"timestamp":"2025-12-31T10:00:00Z","km_from_current":5}}' \
-              -o /dev/null -w "%{time_total}" 2>&1)
+              -o /dev/null -w "%{time_total}" 2>&1) || true
             RC=$?
             if [ $RC -eq 28 ]; then
               echo "-1" >> /tmp/latencies.txt
@@ -241,7 +241,7 @@ jobs:
             RESP=$(curl -s -m 2 -X POST http://localhost:9999/fraud-score \
               -H 'Content-Type: application/json' \
               -d '{"id":"t","transaction":{"amount":100,"installments":1,"requested_at":"2026-01-01T12:00:00Z"},"customer":{"avg_amount":100,"tx_count_24h":10,"known_merchants":[]},"merchant":{"id":"m","mcc":"5411","avg_amount":100},"terminal":{"is_online":false,"card_present":true,"km_from_home":5},"last_transaction":{"timestamp":"2025-12-31T10:00:00Z","km_from_current":5}}' \
-              -o /dev/null -w "%{http_code}" 2>&1)
+              -o /dev/null -w "%{http_code}" 2>&1) || true
             RC=$?
             REQ_COUNT=$((REQ_COUNT + 1))
             # Timeouts (curl exit 28) aparecem como "000" no http_code
