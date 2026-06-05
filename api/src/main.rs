@@ -111,10 +111,8 @@ pub fn process(body: &[u8], state: &AppState) -> FraudResult {
     for d in 0..14 {
         qv[d] = quantize(v[d]);
     }
-    if let Some(cached) = cache::lookup(&qv) {
-        return FraudResult::Score(cached as usize);
-    }
+    // Cache disabled — was potentially poisoning results.
+    // (Re-enable after verifying detection accuracy baseline.)
     let fraud_count = state.ivf.search(&state.dataset, &qv, 5, 1) as u8;
-    cache::insert(&qv, fraud_count);
     FraudResult::Score(fraud_count as usize)
 }

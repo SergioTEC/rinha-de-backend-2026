@@ -134,16 +134,29 @@ unsafe fn distance_i16_avx2(a: &[i16; DIMS], b: &[i16; DIMS]) -> i32 {
     #[cfg(target_arch = "x86")]
     use std::arch::x86::*;
 
-    // Layout: load 8 i16 at a time via _mm_loadu_si128 (16 bytes)
-    // DIMS = 14: 8 dims in first load, 6 dims in second load
-    let a0 = _mm_loadu_si128(a.as_ptr() as *const __m128i);
-    let b0 = _mm_loadu_si128(b.as_ptr() as *const __m128i);
-    let a1 = _mm_loadu_si128(a.as_ptr().add(8) as *const __m128i);
-    let b1 = _mm_loadu_si128(b.as_ptr().add(8) as *const __m128i);
+    // Load 8 + 8 = 16 i16. DIMS=14, so the last 2 elements of the second load
+    // are OUT-OF-BOUNDS garbage. We must zero them out BEFORE squaring.
+    let a0 = _mm_loadu_si128(a.as_ptr() as *const __m128i);              // a[0..8]
+    let b0 = _mm_loadu_si128(b.as_ptr() as *const __m128i);              // b[0..8]
+    let a1 = _mm_loadu_si128(a.as_ptr().add(8) as *const __m128i);        // a[8..16] (last 2 are OOB)
+    let b1 = _mm_loadu_si128(b.as_ptr().add(8) as *const __m128i);        // b[8..16] (last 2 are OOB)
+
+    // CRITICAL: mask off i16 lanes 6 and 7 of a1/b1 to 0.
+    // DIMS=14, so a1/b1 (16 bytes loaded from a[8]/b[8]) contains 6 valid
+    // i16 values (a[8..14] / b[8..14]) plus 2 i16 of OOB garbage.
+    // __m128i has 8 i16 lanes. We want lanes 0..5 keep (-1), lanes 6..7 zero.
+    // _mm_set_epi16(e7, e6, e5, e4, e3, e2, e1, e0) packs high-to-low:
+    //   e0 -> lane 0, e1 -> lane 1, ..., e7 -> lane 7
+    let mask = _mm_set_epi16(
+        0, 0,         // lanes 7, 6: zero out (OOB garbage)
+        -1, -1, -1, -1, -1, -1  // lanes 5, 4, 3, 2, 1, 0: keep
+    );
+    let a1_masked = _mm_and_si128(a1, mask);
+    let b1_masked = _mm_and_si128(b1, mask);
 
     // Compute diff = a - b (per i16)
     let d0 = _mm_sub_epi16(a0, b0);
-    let d1 = _mm_sub_epi16(a1, b1);
+    let d1 = _mm_sub_epi16(a1_masked, b1_masked);
 
     // Square the diffs (i16 * i16 -> i32 via 2-step cvt + mullo)
     // First, sign-extend i16 to i32 (4 lanes at a time)
@@ -162,6 +175,28 @@ unsafe fn distance_i16_avx2(a: &[i16; DIMS], b: &[i16; DIMS]) -> i32 {
     let sum = _mm_add_epi32(sum0, sum1);
 
     // Horizontal sum of 4 i32
+    // sum = [s0, s1, s2, s3]
+    // shuf 0b01_00_11_10 -> [s1, s0, s3, s2] (after _MM_SHUFFLE unpack convention)
+    // sums = sum + shuf = [s0+s1, s1+s0, s2+s3, s3+s2] = [p0, p0, p1, p1] where p0 = s0+s1, p1 = s2+s3
+    // shuf 0b00_00_00_11 -> [s3, s0, s0, s0] (low lane 0 <- src lane 3)
+    // result = sums + shuf = [p0+s3, p0+s0, p1+s0, p1+s0]
+    // Hmm, that's not quite right. Let me redo carefully.
+    // _mm_shuffle_epi32(a, imm) packs imm as 0bzyx where lane i = src[imm_i_bit_pair]
+    // imm = 0b01_00_11_10 means:
+    //   lane 0 = src[0b10] = src[2]
+    //   lane 1 = src[0b11] = src[3]
+    //   lane 2 = src[0b00] = src[0]
+    //   lane 3 = src[0b01] = src[1]
+    // So shuf = [s2, s3, s0, s1]
+    // sums = sum + shuf = [s0+s2, s1+s3, s2+s0, s3+s1] = [p0, p1, p0, p1]
+    // shuf2 imm = 0b00_00_00_11:
+    //   lane 0 = src[0b11] = src[3]
+    //   lane 1 = src[0b00] = src[0]
+    //   lane 2 = src[0b00] = src[0]
+    //   lane 3 = src[0b00] = src[0]
+    // shuf2 = [sums[3], sums[0], sums[0], sums[0]] = [p1, p0, p0, p0]
+    // result = sums + shuf2 = [p0+p1, p1+p0, p0+p0, p1+p0] = [s0+s1+s2+s3, ...]
+    // Lane 0 = s0+s1+s2+s3 = full sum ✓
     let shuf = _mm_shuffle_epi32(sum, 0b01_00_11_10);
     let sums = _mm_add_epi32(sum, shuf);
     let shuf2 = _mm_shuffle_epi32(sums, 0b00_00_00_11);
