@@ -143,18 +143,11 @@ unsafe fn distance_i16_avx2(a: &[i16; DIMS], b: &[i16; DIMS]) -> i32 {
 
     // Compute diff = a - b (per i16)
     let d0 = _mm_sub_epi16(a0, b0);
-    let d1 = _mm_sub_epi16(a0, b1);
-    // Wait that's wrong, let me redo:
-    let d0 = _mm_sub_epi16(a0, b0);
     let d1 = _mm_sub_epi16(a1, b1);
 
-    // Square the diffs (i16 * i16 -> i32)
-    // _mm_madd_epi16 does: a0*b0 + a1*b1 + a2*b2 + a3*b3
-    // For squaring: it computes a[i]*a[i] + a[i+1]*a[i+1] etc, summing pairs
-    // We need to use that trick: dot of (d, d) gives us sum of d[i]^2 + d[i+1]^2
-    // But we want 8 separate values then sum them.
-    // Better: convert to i32, multiply, horizontal sum
-    let d0_lo = _mm_cvtepi16_epi32(d0);  // 4 i16 -> 4 i32
+    // Square the diffs (i16 * i16 -> i32 via 2-step cvt + mullo)
+    // First, sign-extend i16 to i32 (4 lanes at a time)
+    let d0_lo = _mm_cvtepi16_epi32(d0);  // first 4 i16 -> 4 i32
     let d0_hi = _mm_cvtepi16_epi32(_mm_srli_si128(d0, 8));  // next 4 i16
     let d1_lo = _mm_cvtepi16_epi32(d1);
     let d1_hi = _mm_cvtepi16_epi32(_mm_srli_si128(d1, 8));
