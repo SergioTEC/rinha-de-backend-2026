@@ -160,7 +160,7 @@ impl Dataset {
         &self,
         query: &[i16; DIMS],
         idx: usize,
-    ) -> i32 {
+    ) -> i64 {
         distance_impl(query, idx, self.count, &self.dims)
     }
 
@@ -170,11 +170,11 @@ impl Dataset {
         query: &[i16; DIMS],
         k: usize,
     ) -> (Vec<usize>, usize) {
-        let mut best: Vec<(i32, usize)> = Vec::with_capacity(k);
-        
+        let mut best: Vec<(i64, usize)> = Vec::with_capacity(k);
+
         for i in 0..self.count {
             let dist = self.distance(query, i);
-            
+
             if best.len() < k {
                 best.push((dist, i));
                 let mut j = best.len() - 1;
@@ -191,16 +191,17 @@ impl Dataset {
                 }
             }
         }
-        
+
         let fraud_count = best.iter().filter(|(_, idx)| self.labels[*idx] != 0).count();
         let indices = best.into_iter().map(|(_, idx)| idx).collect();
         (indices, fraud_count)
     }
 }
 
-/// L2 distance implementation with AVX2 or scalar fallback
+/// L2 distance implementation with AVX2 or scalar fallback.
+/// Returns i64 to avoid overflow (max: 14 * 65534^2 ≈ 6e10).
 #[inline(always)]
-fn distance_impl(query: &[i16; DIMS], idx: usize, count: usize, dims: &[i16]) -> i32 {
+fn distance_impl(query: &[i16; DIMS], idx: usize, count: usize, dims: &[i16]) -> i64 {
     #[cfg(has_c_avx2)]
     {
         let mut qa = [0i16; 16];
@@ -213,9 +214,9 @@ fn distance_impl(query: &[i16; DIMS], idx: usize, count: usize, dims: &[i16]) ->
     }
     #[cfg(not(has_c_avx2))]
     {
-        let mut sum: i32 = 0;
+        let mut sum: i64 = 0;
         for d in 0..DIMS {
-            let diff = query[d] as i32 - dims[d * count + idx] as i32;
+            let diff = query[d] as i64 - dims[d * count + idx] as i64;
             sum += diff * diff;
         }
         sum

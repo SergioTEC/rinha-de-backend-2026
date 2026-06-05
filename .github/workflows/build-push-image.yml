@@ -89,11 +89,11 @@ jobs:
           fi
 
           echo ""
-          echo "=== Teste de detecção ==="
+          echo "=== Teste de detecção: caso claramente FRAUDE ==="
           RESP=$(curl -s -X POST http://localhost:9999/fraud-score \
             -H 'Content-Type: application/json' \
             -d '{
-              "id": "test1",
+              "id": "test_fraud",
               "transaction": {"amount": 9500, "installments": 10, "requested_at": "2026-01-01T12:00:00Z"},
               "customer": {"avg_amount": 150, "tx_count_24h": 200, "known_merchants": []},
               "merchant": {"id": "MERC-001", "mcc": "5912", "avg_amount": 150},
@@ -103,6 +103,30 @@ jobs:
           echo "Resposta: $RESP"
           echo "$RESP" | grep -q '"approved"' || { echo "FALHOU: sem 'approved'"; docker compose logs; exit 1; }
           echo "$RESP" | grep -q '"fraud_score"' || { echo "FALHOU: sem 'fraud_score'"; docker compose logs; exit 1; }
+          if echo "$RESP" | grep -q '"approved":false'; then
+            echo "✓ Fraude detectada corretamente (approved:false)"
+          else
+            echo "::warning::Fraude NÃO detectada (approved:true). Possível problema de detecção."
+          fi
+
+          echo ""
+          echo "=== Teste de detecção: caso claramente LEGÍTIMO ==="
+          RESP2=$(curl -s -X POST http://localhost:9999/fraud-score \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "id": "test_legit",
+              "transaction": {"amount": 25, "installments": 1, "requested_at": "2026-01-01T12:00:00Z"},
+              "customer": {"avg_amount": 200, "tx_count_24h": 1, "known_merchants": ["MERC-001"]},
+              "merchant": {"id": "MERC-001", "mcc": "5411", "avg_amount": 25},
+              "terminal": {"is_online": false, "card_present": true, "km_from_home": 2},
+              "last_transaction": {"timestamp": "2025-12-31T15:00:00Z", "km_from_current": 1}
+            }')
+          echo "Resposta: $RESP2"
+          if echo "$RESP2" | grep -q '"approved":true'; then
+            echo "✓ Legítimo aprovado corretamente (approved:true)"
+          else
+            echo "::warning::Legítimo NÃO aprovado (approved:false). Possível problema de detecção."
+          fi
 
           echo ""
           echo "=== Teste de carga (200 requests) ==="
