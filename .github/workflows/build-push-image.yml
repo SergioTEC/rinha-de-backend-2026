@@ -97,6 +97,7 @@ jobs:
           echo ""
           echo "=== Teste de carga (200 requests) ==="
           HTTP_500=0
+          > /tmp/codes.txt
           for batch in $(seq 1 20); do
             for i in $(seq 1 10); do
               (
@@ -110,7 +111,8 @@ jobs:
             wait
           done
           TOTAL=$(wc -l < /tmp/codes.txt)
-          HTTP_500=$(grep -c "^5" /tmp/codes.txt || echo 0)
+          HTTP_500=$(grep -c "^5" /tmp/codes.txt 2>/dev/null | head -1)
+          HTTP_500=${HTTP_500:-0}
           echo "Total: $TOTAL, HTTP 5xx: $HTTP_500"
           if [ "$HTTP_500" -gt 10 ]; then
             echo "FALHOU: $HTTP_500 erros 5xx em $TOTAL (5%+)"
