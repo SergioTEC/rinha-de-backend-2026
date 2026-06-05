@@ -1,4 +1,4 @@
-name: Build and Push Docker Image
+name: Build, Test, and Push Docker Image
 
 on:
   push:
@@ -61,8 +61,95 @@ jobs:
             ghcr.io/sergiotec/rinha-2026:${{ github.sha }}
           cache-from: type=registry,ref=ghcr.io/sergiotec/rinha-2026:latest
 
+      - name: Test local (valida antes do push)
+        run: |
+          echo "=== Subindo stack com imagem local ==="
+          docker compose down --remove-orphans 2>&1 || true
+          docker compose up -d 2>&1
+
+          echo ""
+          echo "=== Health check (até 60s) ==="
+          for i in $(seq 1 20); do
+            if curl -sf -o /dev/null --max-time 2 http://localhost:9999/ready; then
+              echo "Health check PASSOU na tentativa $i"
+              break
+            fi
+            echo "Tentativa $i falhou..."
+            sleep 3
+          done
+
+          echo ""
+          echo "=== Teste de detecção ==="
+          RESP=$(curl -s -X POST http://localhost:9999/fraud-score \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "id": "test1",
+              "transaction": {"amount": 9500, "installments": 10, "requested_at": "2026-01-01T12:00:00Z"},
+              "customer": {"avg_amount": 150, "tx_count_24h": 200, "known_merchants": []},
+              "merchant": {"id": "MERC-001", "mcc": "5912", "avg_amount": 150},
+              "terminal": {"is_online": true, "card_present": false, "km_from_home": 850},
+              "last_transaction": {"timestamp": "2025-12-31T10:00:00Z", "km_from_current": 850}
+            }')
+          echo "Resposta: $RESP"
+          echo "$RESP" | grep -q '"approved"' || { echo "FALHOU: sem 'approved'"; docker compose logs; exit 1; }
+          echo "$RESP" | grep -q '"fraud_score"' || { echo "FALHOU: sem 'fraud_score'"; docker compose logs; exit 1; }
+
+          echo ""
+          echo "=== Teste de carga (200 requests) ==="
+          HTTP_500=0
+          for batch in $(seq 1 20); do
+            for i in $(seq 1 10); do
+              (
+                CODE=$(curl -s -X POST http://localhost:9999/fraud-score \
+                  -H 'Content-Type: application/json' \
+                  -d '{"id":"t","transaction":{"amount":100,"installments":1,"requested_at":"2026-01-01T12:00:00Z"},"customer":{"avg_amount":100,"tx_count_24h":10,"known_merchants":[]},"merchant":{"id":"m","mcc":"5411","avg_amount":100},"terminal":{"is_online":false,"card_present":true,"km_from_home":5},"last_transaction":{"timestamp":"2025-12-31T10:00:00Z","km_from_current":5}}' \
+                  -o /dev/null -w "%{http_code}" 2>&1)
+                echo "$CODE" >> /tmp/codes.txt
+              ) &
+            done
+            wait
+          done
+          TOTAL=$(wc -l < /tmp/codes.txt)
+          HTTP_500=$(grep -c "^5" /tmp/codes.txt || echo 0)
+          echo "Total: $TOTAL, HTTP 5xx: $HTTP_500"
+          if [ "$HTTP_500" -gt 10 ]; then
+            echo "FALHOU: $HTTP_500 erros 5xx em $TOTAL (5%+)"
+            docker compose logs
+            exit 1
+          fi
+
+          echo ""
+          echo "=== Medir p99 (200 sequenciais) ==="
+          for i in $(seq 1 200); do
+            curl -s -X POST http://localhost:9999/fraud-score \
+              -H 'Content-Type: application/json' \
+              -d '{"id":"t","transaction":{"amount":100,"installments":1,"requested_at":"2026-01-01T12:00:00Z"},"customer":{"avg_amount":100,"tx_count_24h":10,"known_merchants":[]},"merchant":{"id":"m","mcc":"5411","avg_amount":100},"terminal":{"is_online":false,"card_present":true,"km_from_home":5},"last_transaction":{"timestamp":"2025-12-31T10:00:00Z","km_from_current":5}}' \
+              -o /dev/null -w "%{time_total}\n" 2>&1
+          done | sort -n > /tmp/latencies.txt
+          P50_MS=$(awk -v p=$(awk 'NR==100' /tmp/latencies.txt) 'BEGIN{print int(p*1000)}')
+          P95_MS=$(awk -v p=$(awk 'NR==190' /tmp/latencies.txt) 'BEGIN{print int(p*1000)}')
+          P99_MS=$(awk -v p=$(awk 'NR==198' /tmp/latencies.txt) 'BEGIN{print int(p*1000)}')
+          echo "Latências (ms): p50=$P50_MS  p95=$P95_MS  p99=$P99_MS"
+          if [ "$P99_MS" -gt 50 ]; then
+            echo "::warning::p99 = ${P99_MS}ms (acima de 50ms)"
+          fi
+
+          echo ""
+          echo "=== Cleanup ==="
+          docker compose down --remove-orphans 2>&1 || true
+          echo "Testes locais passaram — prosseguindo para push"
+
       - name: Push Docker image to GHCR
+        if: success()
         run: |
           echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
           docker push ghcr.io/sergiotec/rinha-2026:latest
           docker push ghcr.io/sergiotec/rinha-2026:${{ github.sha }}
+
+      - name: Verify push
+        if: success()
+        run: |
+          echo "Verificando que a imagem foi pushada:"
+          docker manifest inspect ghcr.io/sergiotec/rinha-2026:latest | head -5
+          echo ""
+          echo "Digest do push: ${{ github.sha }}"
