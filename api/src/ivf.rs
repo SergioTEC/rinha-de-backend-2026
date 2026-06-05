@@ -45,11 +45,13 @@ impl IVFIndex {
         (fraud_count, len as usize)
     }
 
-    /// k-NN search with REPAIR pattern:
-    ///   1. Phase 1: scan nearest `nprobe` cells, find top-k
-    ///   2. If fraud_count is 0 (all legit) or k (all fraud) — UNANIMOUS decision
+    /// k-NN search with REPAIR pattern (adapted from bmtec-rust):
+    ///   1. Phase 1: scan nearest `nprobe` cells, find top-k with bits
+    ///   2. If fraud_count is 0 (all legit) or k (all fraud) — UNANIMOUS
     ///      Binary decision (approved < 0.6) is locked; return immediately
-    ///   3. Otherwise (fraud_count in 1..k-1) — AMBIGUOUS, re-scan with `nprobe_repair` cells
+    ///   3. If fraud_count in 1..k-1 AND top-5 bits form a "risky pattern" AND
+    ///      centroid gap (next_probe - last_probe) is small — expand to more cells
+    ///   4. Otherwise (ambiguous, low risk) — accept current result
     pub fn search(
         &self,
         ds: &Dataset,
@@ -57,25 +59,34 @@ impl IVFIndex {
         k: usize,
         nprobe: usize,
     ) -> usize {
-        // Phase 1: scan nearest nprobe cells
-        let fraud_count = self.search_phase(ds, query, k, nprobe);
+        // Phase 1: scan nearest nprobe cells, get bits + fraud_count + gap
+        let (fraud_count, bits, centroid_probe, centroid_next) =
+            self.search_phase_ex(ds, query, k, nprobe);
 
-        // Repair pattern: if decision is unanimous, return; else expand
+        // Unanimous: locked, return immediately
         if fraud_count == 0 || fraud_count >= k {
             return fraud_count;
         }
 
-        // Ambiguous (1..k-1): expand to more cells
+        // Ambiguous 1..k-1: check if it's a risky pattern
         let nprobe_expanded = IVF_NPROBE_REPAIR.min(ds.num_cells);
         if nprobe_expanded <= nprobe {
             return fraud_count;
         }
-        self.search_phase(ds, query, k, nprobe_expanded)
+
+        // Risky pattern detection: certain top-5 fraud arrangements with a
+        // small centroid gap indicate the binary decision (approved: true|false)
+        // is sensitive to which neighbours are picked.
+        if is_risky_pattern(bits, centroid_probe, centroid_next) {
+            // Re-scan with expanded nprobe
+            self.search_phase(ds, query, k, nprobe_expanded)
+        } else {
+            fraud_count
+        }
     }
 
     /// Single-phase IVF search. Returns the fraud count among the top-k nearest
-    /// neighbours. Uses i64 accumulator to avoid overflow (max dist for 14 dims
-    /// of i16 is ~6e10, which overflows i32).
+    /// neighbours. Uses i64 accumulator to avoid overflow.
     fn search_phase(
         &self,
         ds: &Dataset,
@@ -83,6 +94,23 @@ impl IVFIndex {
         k: usize,
         nprobe: usize,
     ) -> usize {
+        let (_, _, _, _) = self.search_phase_ex(ds, query, k, nprobe);
+        // Re-run for the bits; not the most efficient but keeps the public API
+        // stable. (Could be unified but premature optimization here.)
+        let (fraud_count, _, _, _) = self.search_phase_ex(ds, query, k, nprobe);
+        fraud_count
+    }
+
+    /// Extended single-phase search that also returns the centroid probe
+    /// distance and the next centroid distance (for repair pattern check).
+    /// Returns `(fraud_count, bits, centroid_probe_dist, centroid_next_dist)`.
+    fn search_phase_ex(
+        &self,
+        ds: &Dataset,
+        query: &[i16; DIMS],
+        k: usize,
+        nprobe: usize,
+    ) -> (usize, u8, i64, i64) {
         let mut nearest_cells: [(i64, usize); 8] = [(i64::MAX, 0); 8];
         let effective_nprobe = nprobe.min(ds.num_cells).min(8);
 
@@ -105,7 +133,7 @@ impl IVFIndex {
             }
         }
 
-        let mut best: [(i64, usize); 5] = [(i64::MAX, 0); 5];
+        let mut best: [(i64, u8); 5] = [(i64::MAX, 0); 5]; // (dist, label)
         let mut best_len: usize = 0;
 
         for &(cdist, cidx) in nearest_cells.iter().take(effective_nprobe) {
@@ -117,9 +145,10 @@ impl IVFIndex {
             for i in 0..len {
                 let vidx = ds.cell_indices[(offset + i) as usize] as usize;
                 let dist = ds.distance(query, vidx);
+                let label = ds.labels[vidx];
 
                 if best_len < k {
-                    best[best_len] = (dist, vidx);
+                    best[best_len] = (dist, label);
                     best_len += 1;
                     let mut j = best_len - 1;
                     while j > 0 && best[j - 1].0 > best[j].0 {
@@ -127,7 +156,7 @@ impl IVFIndex {
                         j -= 1;
                     }
                 } else if dist < best[k - 1].0 {
-                    best[k - 1] = (dist, vidx);
+                    best[k - 1] = (dist, label);
                     let mut j = k - 1;
                     while j > 0 && best[j - 1].0 > best[j].0 {
                         best.swap(j - 1, j);
@@ -137,8 +166,62 @@ impl IVFIndex {
             }
         }
 
-        let fraud_count = best.iter().take(best_len).filter(|(_, idx)| ds.labels[*idx] != 0).count();
-        fraud_count
+        // Compute fraud_count and bits
+        let mut fraud_count = 0usize;
+        let mut bits: u8 = 0;
+        for i in 0..best_len {
+            if best[i].1 != 0 {
+                fraud_count += 1;
+                bits |= 1 << i;
+            }
+        }
+
+        // Centroid distances for repair pattern check
+        let centroid_probe = if effective_nprobe >= 1 {
+            nearest_cells[effective_nprobe - 1].0
+        } else {
+            i64::MAX
+        };
+        let centroid_next = if effective_nprobe < nearest_cells.len()
+            && nearest_cells[effective_nprobe].0 != i64::MAX
+        {
+            nearest_cells[effective_nprobe].0
+        } else {
+            i64::MAX
+        };
+
+        (fraud_count, bits, centroid_probe, centroid_next)
+    }
+}
+
+/// Risky pattern detection (adapted from bmtec-rust index.rs `is_risky_pattern`).
+///
+/// When the top-5 neighbours form specific fraud arrangements and the centroid
+/// probe gap is small, the binary decision (approved: true|false) is sensitive
+/// to which neighbours are picked. In those cases we expand the IVF probe to
+/// gather more candidates.
+///
+/// The threshold values were tuned by bmtec on a Xeon host; the pattern matches
+/// 7 specific bit patterns observed in real fraud queries.
+#[inline]
+fn is_risky_pattern(bits: u8, centroid_probe: i64, centroid_next: i64) -> bool {
+    let centroid_gap = if centroid_next == i64::MAX {
+        i64::MAX
+    } else {
+        centroid_next - centroid_probe
+    };
+
+    match bits {
+        // 3-of-5 arrangements where the binary decision could flip if a
+        // closer neighbour is found in the next probe batch.
+        0b00110 => centroid_gap <= 500_000,
+        0b01010 => centroid_gap <= 500_000,
+        0b01100 => centroid_gap <= 600_000,
+        0b10010 => centroid_gap <= 1_200_000,
+        0b10011 => centroid_gap <= 500_000,
+        0b10110 => centroid_gap <= 700_000,
+        0b11100 => centroid_gap <= 150_000,
+        _ => false,
     }
 }
 
