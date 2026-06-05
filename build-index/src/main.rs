@@ -54,7 +54,7 @@ fn main() {
                     let vec_idx = offset + i;
                     if vec_idx >= n { break; }
                     
-                    let mut best_dist = i32::MAX;
+                    let mut best_dist = i64::MAX;
                     let mut best_c = 0;
                     for c in 0..NUM_CELLS {
                         let d = distance_i16(&centroids[c], &vectors[vec_idx]);
@@ -287,15 +287,11 @@ fn parse_json(data: &str) -> (Vec<[i16; DIMS]>, Vec<bool>) {
     (vectors, labels)
 }
 
-fn distance_i16(a: &[i16; DIMS], b: &[i16; DIMS]) -> i32 {
+fn distance_i16(a: &[i16; DIMS], b: &[i16; DIMS]) -> i64 {
     let mut sum: i64 = 0;
     for d in 0..DIMS {
         let diff = a[d] as i64 - b[d] as i64;
         sum += diff * diff;
     }
-    if sum > i32::MAX as i64 {
-        i32::MAX
-    } else {
-        sum as i32
-    }
+    sum
 }

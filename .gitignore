@@ -24,3 +24,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Dataset (grande, gerado externamente)
+resources/references.json.gz
+resources/example-references.json
