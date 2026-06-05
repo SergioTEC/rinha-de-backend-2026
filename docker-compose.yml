@@ -13,7 +13,7 @@ services:
     entrypoint: ["/app/lb"]
     environment:
       - PORT=9999
-      - FD_UPSTREAMS=/tmp/sock/api1.sock,/tmp/sock/api2.sock
+      - FD_UPSTREAMS=/tmp/sock/api1-w0.sock,/tmp/sock/api1-w1.sock,/tmp/sock/api2-w0.sock,/tmp/sock/api2-w1.sock
     ports:
       - "9999:9999"
     volumes:

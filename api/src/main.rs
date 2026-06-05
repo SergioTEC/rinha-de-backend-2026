@@ -83,12 +83,37 @@ fn main() {
         println!("[API] Ready for requests");
     });
 
-    println!("[API] Starting epoll server...");
+    println!("[API] Starting epoll servers ({} workers)...", num_workers());
 
     let get_state: Arc<dyn Fn() -> Option<Arc<AppState>> + Send + Sync> = Arc::new(|| STATE.get().cloned());
-    if let Err(e) = server::run(&sock_path, get_state) {
-        eprintln!("[API] server error: {}", e);
+    let n = num_workers();
+    let mut handles = Vec::with_capacity(n);
+    for w in 0..n {
+        let sock = if n == 1 {
+            sock_path.clone()
+        } else {
+            format!("{}-w{}", sock_path, w)
+        };
+        let gs = get_state.clone();
+        handles.push(std::thread::Builder::new()
+            .name(format!("epoll-{}", w))
+            .spawn(move || {
+                if let Err(e) = server::run(&sock, gs) {
+                    eprintln!("[API] worker {} server error: {}", w, e);
+                }
+            })
+            .expect("spawn worker"));
     }
+    for h in handles {
+        let _ = h.join();
+    }
+}
+
+fn num_workers() -> usize {
+    std::env::var("API_WORKERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2)
 }
 
 fn warm_up(state: &AppState) {
