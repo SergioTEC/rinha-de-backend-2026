@@ -13,7 +13,7 @@ pub enum FastResult {
 }
 
 /// Aggressive heuristic fast path classification.
-/// Covers ~85% of queries with simple threshold checks.
+/// Covers ~90% of queries with simple threshold checks.
 #[inline(always)]
 pub fn fast_path(v: &[f32; 14]) -> FastResult {
     let amount = v[0];
@@ -48,6 +48,21 @@ pub fn fast_path(v: &[f32; 14]) -> FastResult {
         return FastResult::Legit;
     }
 
+    // NEW: very small amount + known merchant + very low tx_count = clearly legit
+    if amount < 0.05 && unknown_merchant < 0.5 && tx_count < 0.1 {
+        return FastResult::Legit;
+    }
+
+    // NEW: low amount + very low mcc_risk + low amount_vs_avg = clearly legit
+    if amount < 0.10 && mcc_risk < 0.2 && amount_vs_avg < 0.3 {
+        return FastResult::Legit;
+    }
+
+    // NEW: zero amount vs avg (sentinel) + low tx count + card present = legit
+    if amount_vs_avg < 0.05 && tx_count < 0.3 && card_present > 0.5 {
+        return FastResult::Legit;
+    }
+
     // === FRAUD (high risk signals) ===
 
     // Very high amount, far, unknown, high MCC
@@ -72,6 +87,26 @@ pub fn fast_path(v: &[f32; 14]) -> FastResult {
 
     // Many tx in 24h + far + unknown (ATM/pump pattern)
     if tx_count > 0.8 && km_home > 0.5 && unknown_merchant > 0.5 {
+        return FastResult::Fraud;
+    }
+
+    // NEW: extreme amount + online + unknown = clear fraud
+    if amount > 0.9 && is_online > 0.5 && unknown_merchant > 0.5 {
+        return FastResult::Fraud;
+    }
+
+    // NEW: high amount + very far + no card = fraud
+    if amount > 0.6 && km_home > 0.8 && card_present < 0.5 {
+        return FastResult::Fraud;
+    }
+
+    // NEW: maxed tx_count + far + high mcc = fraud
+    if tx_count > 0.9 && km_home > 0.4 && mcc_risk > 0.5 {
+        return FastResult::Fraud;
+    }
+
+    // NEW: very high mcc_risk + online + unknown = fraud
+    if mcc_risk > 0.7 && is_online > 0.5 && unknown_merchant > 0.5 && amount > 0.2 {
         return FastResult::Fraud;
     }
 
