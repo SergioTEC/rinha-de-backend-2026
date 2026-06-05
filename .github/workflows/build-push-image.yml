@@ -294,11 +294,12 @@ jobs:
           fi
 
           echo ""
-          echo "=== Teste de carga SUSTENTADA 60s @ ~40 RPS (mais próximo do bot) ==="
+          echo "=== Teste de carga SUSTENTADA 120s @ ~41 RPS (IGUAL AO BOT) ==="
+          echo "Bot oficial: 5.000 requests em 120s, timeout 2.001s"
           echo "Detecta: race conditions, memory leaks, flakiness, saturation effects"
           echo "Load atual antes da carga: $(cat /proc/loadavg | awk '{print $1}')"
           > /tmp/sust_codes.txt
-          END_TS=$(( $(date +%s) + 60 ))
+          END_TS=$(( $(date +%s) + 120 ))
           REQ_COUNT=0
           ERR_COUNT=0
           while [ $(date +%s) -lt $END_TS ]; do
@@ -315,17 +316,17 @@ jobs:
               ERR_COUNT=$((ERR_COUNT + 1))
             fi
             # Throttle to ~40 RPS
-            sleep 0.025
+            sleep 0.024
           done
-          echo "Sustained: $REQ_COUNT requests em 60s, $ERR_COUNT timeouts/erros 5xx"
+          echo "Sustained: $REQ_COUNT requests em 120s, $ERR_COUNT timeouts/erros 5xx"
           echo "Load após carga: $(cat /proc/loadavg | awk '{print $1}')"
           if [ "$ERR_COUNT" -gt "$((REQ_COUNT / 20))" ]; then
             echo "::error::$ERR_COUNT erros em $REQ_COUNT (>5%) — degradação severa"
             docker compose logs
             exit 1
           fi
-          if [ "$REQ_COUNT" -lt 2000 ]; then
-            echo "::warning::Só $REQ_COUNT requests em 60s (< 33 RPS, throttled)"
+          if [ "$REQ_COUNT" -lt 4500 ]; then
+            echo "::warning::Só $REQ_COUNT requests em 120s (< 37 RPS, throttled — bot faria 5000)"
           fi
 
           echo ""
