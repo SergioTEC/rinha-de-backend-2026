@@ -161,6 +161,15 @@ pub fn distance_i16(a: &[i16; DIMS], b: &[i16; DIMS]) -> i64 {
     sum
 }
 
+/// AVX2 squared L2 distance using `_mm256_madd_epi16` (pairwise multiply-add).
+///
+/// Loads both inputs as a single 32-byte SIMD load each (16 × i16). DIMS=14
+/// leaves the last 2 lanes as OOB garbage — we mask them to 0 BEFORE
+/// subtracting, so the multiply-add below treats them as a no-op (0²=0).
+/// This is both **correct** and **faster** than our prior hand-rolled
+/// cvt→mullo→cvt-to-i64 chain: `madd` does d[0]²+d[1]², d[2]²+d[3]², ... in one
+/// instruction, then we widen the 8 × i32 result to i64 BEFORE summing to
+/// avoid the (1.5e10) i32 overflow.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 unsafe fn distance_i16_avx2(a: &[i16; DIMS], b: &[i16; DIMS]) -> i64 {
@@ -169,69 +178,39 @@ unsafe fn distance_i16_avx2(a: &[i16; DIMS], b: &[i16; DIMS]) -> i64 {
     #[cfg(target_arch = "x86")]
     use std::arch::x86::*;
 
-    let a0 = _mm_loadu_si128(a.as_ptr() as *const __m128i);
-    let b0 = _mm_loadu_si128(b.as_ptr() as *const __m128i);
-    let a1 = _mm_loadu_si128(a.as_ptr().add(8) as *const __m128i);
-    let b1 = _mm_loadu_si128(b.as_ptr().add(8) as *const __m128i);
-
-    // Mask off i16 lanes 6,7 of a1/b1 to 0 (OOB garbage)
-    let mask = _mm_set_epi16(
-        0, 0,
-        -1, -1, -1, -1, -1, -1
+    // Mask: keep i16 lanes 0..13, zero lanes 14,15.
+    // _mm256_setr_epi16 args are low-to-high: arg 0 = lane 0, arg 15 = lane 15.
+    let mask = _mm256_setr_epi16(
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0,
     );
-    let a1_masked = _mm_and_si128(a1, mask);
-    let b1_masked = _mm_and_si128(b1, mask);
 
-    let d0 = _mm_sub_epi16(a0, b0);
-    let d1 = _mm_sub_epi16(a1_masked, b1_masked);
+    // Single 32-byte load per vector (16 × i16). The last 2 lanes are
+    // OOB garbage (since [i16; 14] is only 28 bytes). The mask zeroes them.
+    let av = _mm256_loadu_si256(a.as_ptr() as *const __m256i);
+    let bv = _mm256_loadu_si256(b.as_ptr() as *const __m256i);
+    let av = _mm256_and_si256(av, mask);
+    let bv = _mm256_and_si256(bv, mask);
 
-    // Square i16 -> i32 (4 lanes at a time)
-    let d0_lo = _mm_cvtepi16_epi32(d0);
-    let d0_hi = _mm_cvtepi16_epi32(_mm_srli_si128(d0, 8));
-    let d1_lo = _mm_cvtepi16_epi32(d1);
-    let d1_hi = _mm_cvtepi16_epi32(_mm_srli_si128(d1, 8));
+    // diff = a - b (per i16)
+    let d = _mm256_sub_epi16(av, bv);
 
-    // Square (i32 * i32 -> i32 via mullo)
-    let d0_lo_sq = _mm_mullo_epi32(d0_lo, d0_lo);
-    let d0_hi_sq = _mm_mullo_epi32(d0_hi, d0_hi);
-    let d1_lo_sq = _mm_mullo_epi32(d1_lo, d1_lo);
-    let d1_hi_sq = _mm_mullo_epi32(d1_hi, d1_hi);
+    // madd(d, d) -> 8 × i32, where lane i = d[2i]² + d[2i+1]².
+    // Each pair-sum fits in i32 (max 2 * 20000² = 8e8).
+    let madd = _mm256_madd_epi16(d, d);
 
-    // Sum to i32 (still fits: 14 * (32767)^2 / 4 per quad = 4.7e9 which overflows i32)
-    // Wait — full sum is 14 * 32767^2 ≈ 1.5e10, which overflows i32.
-    // We need to promote to i64 BEFORE summing.
-    // Use _mm256_cvtepi32_epi64 to extend 4 i32 to 4 i64.
-    let sum32_0 = _mm_add_epi32(_mm_add_epi32(d0_lo_sq, d0_hi_sq), _mm_add_epi32(d1_lo_sq, d1_hi_sq));
-    // sum32_0 = [s0, s1, s2, s3] i32 — each lane is sum of 4 dims squared.
-    // Wait, that's wrong. Each lane is sum of 4 dims squared, but we have 14 dims.
-    // Total sum = sum of 14 dims squared. Currently sum32_0 has sum of 4+4+4+2 = 14 lanes worth.
-    // Hmm, actually d0_lo, d0_hi, d1_lo, d1_hi each have 4 lanes (total 16 lanes), and we're
-    // squaring 14 valid + 2 garbage (masked to 0). So sum is correctly 14 dims squared.
-    // But sum32_0 is the sum of the 4 i32 squared, so it's 4 lanes each containing sum of
-    // 4 dims (overlapping: d0_lo covers dims 0-3, d0_hi covers 4-7, d1_lo covers 8-11,
-    // d1_hi covers 12-13 plus 2 garbage = 0). So sum32_0 lane 0 = dims 0-3 + 4-7 + 8-11 + 12-13.
-    // That's all 14 dims! ✓
-    // Now we need to sum these 4 i32 lanes into 1 i64.
-    // Hmm, but each lane can be up to 14 * 32767^2 ≈ 1.5e10 which overflows i32 (max 2.1e9).
-    // So sum32_0 is OVERFLOWED as i32! ❌
+    // Widen to i64 BEFORE summing — otherwise 8 × 8e8 ≈ 6.4e9 overflows i32.
+    let lo = _mm256_cvtepi32_epi64(_mm256_castsi256_si128(madd)); // 4 × i64
+    let hi = _mm256_cvtepi32_epi64(_mm256_extracti128_si256(madd, 1)); // 4 × i64
+    let sum = _mm256_add_epi64(lo, hi); // 4 × i64 (each is sum of 4 dims squared)
 
-    // CORRECT APPROACH: convert each i32 squared to i64 BEFORE summing.
-    let s0_i64 = _mm256_cvtepi32_epi64(d0_lo_sq);  // 4 i32 -> 4 i64
-    let s1_i64 = _mm256_cvtepi32_epi64(d0_hi_sq);
-    let s2_i64 = _mm256_cvtepi32_epi64(d1_lo_sq);
-    let s3_i64 = _mm256_cvtepi32_epi64(d1_hi_sq);
-
-    let sum64 = _mm256_add_epi64(_mm256_add_epi64(s0_i64, s1_i64), _mm256_add_epi64(s2_i64, s3_i64));
-    // sum64 = 4 i64, each is the sum of 4 dims squared. Total = sum of 14 dims squared.
-
-    // Horizontal sum of 4 i64 lanes to 1 i64
-    // Move high lane (lane 2,3) to low and add
-    let shuf = _mm256_permute4x64_epi64::<0b11_10_01_00>(sum64);  // [lane3, lane2, lane1, lane0]
-    let sum_pair = _mm256_add_epi64(sum64, shuf);  // [s3+s0, s2+s1, s1+s2, s0+s3]
-    // Extract low 128 bits and add the two i64 lanes
-    let lo128 = _mm256_castsi256_si128(sum_pair);  // [s3+s0, s2+s1]
-    let sum_lo = _mm_add_epi64(lo128, _mm_srli_si128(lo128, 8));  // [(s3+s0)+(s2+s1), ...]
-    _mm_cvtsi128_si64(sum_lo)  // Lane 0 = total sum as i64
+    // Horizontal sum 4 × i64 → 1 × i64
+    // sum = [s0, s1, s2, s3]
+    // extract lo (s0, s1) and hi (s2, s3), then add pairs
+    let sum_lo = _mm256_castsi256_si128(sum);
+    let sum_hi = _mm256_extracti128_si256(sum, 1);
+    let pair = _mm_add_epi64(sum_lo, sum_hi); // [s0+s2, s1+s3] (order doesn't matter)
+    let pair_hi = _mm_unpackhi_epi64(pair, pair); // [s1+s3, s1+s3]
+    _mm_cvtsi128_si64(_mm_add_epi64(pair, pair_hi)) // lane 0 = s0+s1+s2+s3
 }
 
 #[cfg(test)]
