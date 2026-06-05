@@ -93,8 +93,8 @@ jobs:
           sleep 5
 
           echo ""
-          echo "=== Health check (até 180s, simula ambiente lento) ==="
-          for i in $(seq 1 60); do
+          echo "=== Health check (até 90s) ==="
+          for i in $(seq 1 30); do
             if curl -sf -o /dev/null --max-time 2 http://localhost:9999/ready; then
               echo "Health check PASSOU na tentativa $i"
               break
