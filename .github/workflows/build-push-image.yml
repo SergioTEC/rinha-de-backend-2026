@@ -201,7 +201,10 @@ jobs:
               -H 'Content-Type: application/json' \
               -d '{"id":"t","transaction":{"amount":100,"installments":1,"requested_at":"2026-01-01T12:00:00Z"},"customer":{"avg_amount":100,"tx_count_24h":10,"known_merchants":[]},"merchant":{"id":"m","mcc":"5411","avg_amount":100},"terminal":{"is_online":false,"card_present":true,"km_from_home":5},"last_transaction":{"timestamp":"2025-12-31T10:00:00Z","km_from_current":5}}' \
               -o /dev/null -w "%{time_total}" 2>&1)
-            if [ -n "$T" ]; then
+            RC=$?
+            if [ $RC -eq 28 ]; then
+              echo "-1" >> /tmp/latencies.txt
+            elif [ -n "$T" ]; then
               echo "$T" >> /tmp/latencies.txt
             else
               echo "-1" >> /tmp/latencies.txt
@@ -239,9 +242,10 @@ jobs:
               -H 'Content-Type: application/json' \
               -d '{"id":"t","transaction":{"amount":100,"installments":1,"requested_at":"2026-01-01T12:00:00Z"},"customer":{"avg_amount":100,"tx_count_24h":10,"known_merchants":[]},"merchant":{"id":"m","mcc":"5411","avg_amount":100},"terminal":{"is_online":false,"card_present":true,"km_from_home":5},"last_transaction":{"timestamp":"2025-12-31T10:00:00Z","km_from_current":5}}' \
               -o /dev/null -w "%{http_code}" 2>&1)
+            RC=$?
             REQ_COUNT=$((REQ_COUNT + 1))
             # Timeouts (curl exit 28) aparecem como "000" no http_code
-            if [ "${RESP:0:3}" = "000" ]; then
+            if [ $RC -eq 28 ] || [ "${RESP:0:3}" = "000" ]; then
               ERR_COUNT=$((ERR_COUNT + 1))
             elif [ "${RESP:0:1}" = "5" ]; then
               ERR_COUNT=$((ERR_COUNT + 1))
