@@ -93,11 +93,13 @@ fn main() {
 
 fn warm_up(state: &AppState) {
     println!("[API] Warming up (varied synthetic queries)...");
-    // Run 4096 varied synthetic queries to populate L1/L2 cache with centroid
+    // Run 1024 varied synthetic queries to populate L1/L2 cache with centroid
     // and cell data, train the BPU on the search hot path, and pre-fault any
     // not-yet-touched pages of the dataset. Inspired by dalvorsn-cpp's 900ms
     // warmup window and bmtec-rust's pre-faulting strategy.
-    for i in 0..4096u32 {
+    // 1024 (vs 4096) keeps the startup fast enough for the bot's 60s health
+    // check budget on a 2.6GHz Mac Mini.
+    for i in 0..1024u32 {
         let mut q = [0i16; DIMS];
         for d in 0..DIMS {
             // Pseudo-random stride per query to touch different cache lines.
@@ -110,6 +112,7 @@ fn warm_up(state: &AppState) {
         };
         let _ = state.ivf.search(&state.dataset, &q, 5, nprobe);
     }
+    println!("[API] Warmup done");
 }
 
 pub fn process(body: &[u8], state: &AppState) -> FraudResult {

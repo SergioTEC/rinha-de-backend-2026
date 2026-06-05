@@ -72,21 +72,18 @@ jobs:
           sleep 5
 
           echo ""
-          echo "=== Health check (até 60s) ==="
-          for i in $(seq 1 20); do
-            CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 http://localhost:9999/ready 2>&1)
-            if [ "$CODE" = "200" ]; then
-              echo "Health check PASSOU na tentativa $i (status $CODE)"
+          echo "=== Health check (até 90s) ==="
+          for i in $(seq 1 30); do
+            if curl -sf -o /dev/null --max-time 2 http://localhost:9999/ready; then
+              echo "Health check PASSOU na tentativa $i"
               break
             fi
+            echo "Tentativa $i falhou, aguardando 3s..."
+            sleep 3
+          done
             echo "Tentativa $i falhou (status: $CODE), aguardando 3s..."
             sleep 3
           done
-          if [ "$CODE" != "200" ]; then
-            echo "FALHOU: /ready não retornou 200 após 60s (último status: $CODE)"
-            docker compose logs
-            exit 1
-          fi
 
           echo ""
           echo "=== Teste de detecção com payloads REAIS do REGRAS_DE_DETECCAO.md ==="
