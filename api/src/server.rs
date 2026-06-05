@@ -52,6 +52,23 @@ impl Conn {
                 &one as *const _ as *const _,
                 std::mem::size_of::<libc::c_int>() as libc::socklen_t,
             );
+            // SO_BUSY_POLL: spin on the socket for N µs before sleeping in epoll.
+            // At low RPS, this avoids a wake-up latency hit; at saturation the
+            // epoll loop is busy anyway, so the spin just burns quota harmlessly.
+            // Reads RINHA_BUSY_POLL_US env var (default 0 = disabled).
+            let busy_us: libc::c_int = std::env::var("RINHA_BUSY_POLL_US")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            if busy_us > 0 {
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_BUSY_POLL,
+                    &busy_us as *const _ as *const _,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+            }
         }
         Conn {
             fd,

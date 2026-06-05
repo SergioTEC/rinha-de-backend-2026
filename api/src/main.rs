@@ -15,7 +15,7 @@ use std::thread;
 
 use json_parser::{init_mcc_risk_table, parse_transaction};
 use vectorize::{vectorize, quantize};
-use dataset::Dataset;
+use dataset::{Dataset, DIMS};
 use fastpath::{fast_path, FastResult};
 use ivf::IVFIndex;
 use http::FraudResult;
@@ -34,6 +34,10 @@ fn main() {
     #[cfg(target_os = "linux")]
     unsafe {
         libc::prctl(libc::PR_SET_TIMERSLACK, 1u64, 0, 0, 0);
+        // mlockall(MCL_CURRENT | MCL_FUTURE): lock all current and future pages
+        // in RAM, preventing page faults during the request hot path.
+        // Best-effort: EPERM/RLIMIT_MEMLOCK errors are silent.
+        libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE);
     }
 
     if let Some(parent) = std::path::Path::new(&sock_path).parent() {
@@ -88,11 +92,23 @@ fn main() {
 }
 
 fn warm_up(state: &AppState) {
-    println!("[API] Warming up...");
-    let mut q = [0i16; 14];
-    for _ in 0..256 {
-        let _ = state.ivf.search(&state.dataset, &q, 5, ivf::IVF_NPROBE_EASY);
-        q[0] = q[0].wrapping_add(100);
+    println!("[API] Warming up (varied synthetic queries)...");
+    // Run 4096 varied synthetic queries to populate L1/L2 cache with centroid
+    // and cell data, train the BPU on the search hot path, and pre-fault any
+    // not-yet-touched pages of the dataset. Inspired by dalvorsn-cpp's 900ms
+    // warmup window and bmtec-rust's pre-faulting strategy.
+    for i in 0..4096u32 {
+        let mut q = [0i16; DIMS];
+        for d in 0..DIMS {
+            // Pseudo-random stride per query to touch different cache lines.
+            q[d] = ((i.wrapping_mul(2654435761).wrapping_add(d as u32 * 37)) as i16).wrapping_mul(13);
+        }
+        let nprobe = if (i & 0xF) == 0 {
+            ivf::IVF_NPROBE_REPAIR
+        } else {
+            ivf::IVF_NPROBE_EASY
+        };
+        let _ = state.ivf.search(&state.dataset, &q, 5, nprobe);
     }
 }
 
