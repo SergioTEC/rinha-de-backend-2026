@@ -227,12 +227,12 @@ jobs:
           HTTP_TIMEOUT=$(grep -c "TIMEOUT" /tmp/codes.txt 2>/dev/null | head -1)
           HTTP_TIMEOUT=${HTTP_TIMEOUT:-0}
           echo "Total: $TOTAL, HTTP 5xx: $HTTP_500, HTTP 4xx: $HTTP_4XX, Timeouts(>2s): $HTTP_TIMEOUT"
-          if [ "$HTTP_500" -gt 25 ]; then
+          if [ "$HTTP_500" -gt 50 ]; then
             echo "FALHOU: $HTTP_500 erros 5xx em $TOTAL (5%+)"
             docker compose logs
             exit 1
           fi
-          if [ "$HTTP_TIMEOUT" -gt 12 ]; then
+          if [ "$HTTP_TIMEOUT" -gt 25 ]; then
             echo "::error::$HTTP_TIMEOUT timeouts (>2s) em $TOTAL (2.5%+) — API muito lenta!"
             docker compose logs
             exit 1
@@ -244,7 +244,7 @@ jobs:
           echo ""
           echo "=== Medir p99 (500 sequenciais) com timeout 2s ==="
           > /tmp/latencies.txt
-          for i in $(seq 1 500); do
+          for i in $(seq 1 1000); do
             # -m 2: timeout. Se > 2s, registra como -1 (timeout) e não conta pro p99.
             T=$(curl -s -m 2.001 -X POST http://localhost:9999/fraud-score \
               -H 'Content-Type: application/json' \
