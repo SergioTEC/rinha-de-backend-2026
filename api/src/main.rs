@@ -1,7 +1,6 @@
 mod json_parser;
 mod vectorize;
 mod dataset;
-mod fastpath;
 mod ivf;
 mod http;
 mod server;
@@ -16,7 +15,6 @@ use std::thread;
 use json_parser::{init_mcc_risk_table, parse_transaction};
 use vectorize::{vectorize, quantize};
 use dataset::{Dataset, DIMS};
-use fastpath::{fast_path, FastResult};
 use ivf::IVFIndex;
 use http::FraudResult;
 
@@ -120,12 +118,8 @@ pub fn process(body: &[u8], state: &AppState) -> FraudResult {
     let mut v = [0.0f32; 14];
     vectorize(&tx, &mut v);
 
-    match fast_path(&v) {
-        FastResult::Legit => return FraudResult::Score(0),
-        FastResult::Fraud => return FraudResult::Score(5),
-        FastResult::Borderline => {}
-    }
-
+    // No fastpath: every query goes through the IVF search, like the top 1.
+    // This eliminates the risk of FP/FN from heuristic rules.
     let mut qv = [0i16; 14];
     for d in 0..14 {
         qv[d] = quantize(v[d]);
