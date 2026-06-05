@@ -372,6 +372,7 @@ fn process_buffer(
         b"HTTP/1.1 200 OK\r\nContent-Length: 36\r\nConnection: keep-alive\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}",
         b"HTTP/1.1 200 OK\r\nContent-Length: 36\r\nConnection: keep-alive\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}",
     ];
+    const SERVICE_UNAVAILABLE: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 33\r\nConnection: keep-alive\r\n\r\n{\"error\":\"not ready, still loading\"}";
 
     let buf = &c.read_buf[..c.filled];
     let (method, path, body_start) = match parse_http_request(buf) {
@@ -387,14 +388,19 @@ fn process_buffer(
 
     let response: Vec<u8>;
     if method == "GET" && path == "/ready" {
-        response = HTTP_READY.to_vec();
+        // Only return 200 when STATE is set (dataset loaded).
+        if get_state().is_some() {
+            response = HTTP_READY.to_vec();
+        } else {
+            response = SERVICE_UNAVAILABLE.to_vec();
+        }
     } else if method == "POST" && path == "/fraud-score" {
         match get_state().as_ref() {
             Some(state) => match process(body, state) {
                 FraudResult::Score(n) => response = SCORE_RESPONSES[n.min(5)].to_vec(),
                 FraudResult::Error => response = HTTP_BAD_REQUEST.to_vec(),
             },
-            None => response = HTTP_BAD_REQUEST.to_vec(),
+            None => response = SERVICE_UNAVAILABLE.to_vec(),
         }
     } else {
         response = HTTP_NOT_FOUND.to_vec();
