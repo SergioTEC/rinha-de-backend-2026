@@ -81,9 +81,6 @@ jobs:
             echo "Tentativa $i falhou, aguardando 3s..."
             sleep 3
           done
-            echo "Tentativa $i falhou (status: $CODE), aguardando 3s..."
-            sleep 3
-          done
 
           echo ""
           echo "=== Teste de detecção com payloads REAIS do REGRAS_DE_DETECCAO.md ==="
