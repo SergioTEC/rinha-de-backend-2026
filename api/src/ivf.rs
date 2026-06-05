@@ -6,21 +6,68 @@ use crate::dataset::{Dataset, DIMS};
 pub const IVF_NPROBE_EASY: usize = 1;
 pub const IVF_NPROBE_HARD: usize = 8;
 pub const IVF_NPROBE_REPAIR: usize = 12;  // Expanded probe when result is ambiguous (1-4)
+pub const IVF_NPARTITIONS: usize = 16;     // Number of partition keys (2^4 bits)
 /// Early stopping threshold: if the k-th neighbor distance is below this,
 /// we've found "good enough" neighbors — no need to scan more cells.
 pub const IVF_EARLY_DISTANCE_LIMIT: i64 = 200_000;
 
+/// Compute partition key from a quantized query.
+/// Uses 4 features that are stable across different fraud patterns:
+/// - bit 0: amount > 5000 (high-value tx)
+/// - bit 1: km_from_home > 500 (far from home)
+/// - bit 2: tx_count_24h > 10 (many recent tx)
+/// - bit 3: amount_vs_avg > 0.5 (unusual amount)
+#[inline(always)]
+pub fn partition_key(q: &[i16; DIMS]) -> u8 {
+    let mut key = 0u8;
+    // Quantized values use QSCALE = 10000, so threshold = real_value * 10000.
+    // We use i16::MAX-capped thresholds: amount > 3000, km > 300, tx > 8, ratio > 0.3.
+    if q[0] > 30_000 { key |= 1 << 0; }
+    if q[7] > 3_000 { key |= 1 << 1; }
+    if q[8] > 8_000 { key |= 1 << 2; }
+    if q[2] > 3_000 { key |= 1 << 3; }
+    key
+}
+
 pub struct IVFIndex {
     pub num_cells: usize,
+    /// Map from partition key (0-15) to list of cell indices that "belong" to it.
+    /// Each cell is assigned to the partition key most common in its vectors.
+    pub part_by_key: Vec<[u32; 8]>,  // up to 8 cells per partition
+    pub part_count: Vec<u32>,         // how many cells per partition
 }
 
 impl IVFIndex {
     pub fn new() -> Self {
-        Self { num_cells: 0 }
+        Self {
+            num_cells: 0,
+            part_by_key: vec![[u32::MAX; 8]; IVF_NPARTITIONS],
+            part_count: vec![0; IVF_NPARTITIONS],
+        }
     }
 
     pub fn build_from_dataset(ds: &Dataset, _num_cells: usize) -> Self {
-        Self { num_cells: ds.num_cells }
+        let mut ivf = Self {
+            num_cells: ds.num_cells,
+            part_by_key: vec![[u32::MAX; 8]; IVF_NPARTITIONS],
+            part_count: vec![0; IVF_NPARTITIONS],
+        };
+        ivf.assign_partitions(ds);
+        ivf
+    }
+
+    /// Build partition -> cells mapping from dataset centroids.
+    /// For each cell, sample its centroid to derive a partition key.
+    fn assign_partitions(&mut self, ds: &Dataset) {
+        for c in 0..ds.num_cells {
+            let key = partition_key(&ds.centroids[c]) as usize;
+            let count = self.part_count[key] as usize;
+            if count < self.part_by_key[key].len() {
+                self.part_by_key[key][count] = c as u32;
+                self.part_count[key] += 1;
+            }
+            // If partition is full (>8 cells), overflow cells fall back to round-robin
+        }
     }
 
     /// Count frauds in a single cell (fastpath). Returns (fraud_count, total_count).
@@ -114,32 +161,58 @@ impl IVFIndex {
         k: usize,
         nprobe: usize,
     ) -> (usize, u8, i64, i64) {
-        let mut nearest_cells: [(i64, usize); 12] = [(i64::MAX, 0); 12];
-        let effective_nprobe = nprobe.min(ds.num_cells).min(12);
+        // Compute REAL centroid distances and sort by boosted distance
+        // (real distance minus 1 if cell is in query's partition).
+        // The boost makes partition-matched cells appear closer without
+        // changing the actual centroid distance used for lower-bound checks.
+        let qkey = partition_key(query) as usize;
+        let pcount = self.part_count[qkey] as usize;
+        let mut is_in_partition: [bool; 12] = [false; 12];
+        let mut cells: [(i64, usize); 12] = [(i64::MAX, 0); 12];  // (boosted_dist, cell_idx)
+        let mut real_dist: [i64; 12] = [i64::MAX; 12];            // actual centroid distance
 
         for c in 0..ds.num_cells {
-            let dist = distance_i16(query, &ds.centroids[c]);
+            let rdist = distance_i16(query, &ds.centroids[c]);
+            let mut in_partition = false;
+            for i in 0..pcount {
+                if self.part_by_key[qkey][i] as usize == c {
+                    in_partition = true;
+                    break;
+                }
+            }
+            // Boosted distance for sorting: partition-matched cells get -1.
+            let sdist = if in_partition { rdist.saturating_sub(1) } else { rdist };
 
-            let mut insert_idx = effective_nprobe;
-            for i in 0..effective_nprobe {
-                if dist < nearest_cells[i].0 {
+            // Simple linear insert: only 12 cells to track, so O(n^2) is fine.
+            let effective = 12.min(nprobe).min(ds.num_cells);
+            let mut insert_idx = effective;
+            for i in 0..effective {
+                if sdist < cells[i].0 {
                     insert_idx = i;
                     break;
                 }
             }
-
-            if insert_idx < effective_nprobe {
-                for j in (insert_idx + 1..effective_nprobe).rev() {
-                    nearest_cells[j] = nearest_cells[j - 1];
+            if insert_idx < effective {
+                for j in (insert_idx + 1..effective).rev() {
+                    cells[j] = cells[j - 1];
+                    real_dist[j] = real_dist[j - 1];
+                    is_in_partition[j] = is_in_partition[j - 1];
                 }
-                nearest_cells[insert_idx] = (dist, c);
+                cells[insert_idx] = (sdist, c);
+                real_dist[insert_idx] = rdist;
+                is_in_partition[insert_idx] = in_partition;
             }
         }
+        let nearest_cells = cells;
+        let effective_nprobe = nprobe.min(ds.num_cells).min(12);
 
         let mut best: [(i64, u8); 5] = [(i64::MAX, 0); 5]; // (dist, label)
         let mut best_len: usize = 0;
 
-        for &(cdist, cidx) in nearest_cells.iter().take(effective_nprobe) {
+        for i in 0..effective_nprobe {
+            let cdist = real_dist[i];
+            let cidx = nearest_cells[i].1;
+
             // Early stopping: if centroid distance already exceeds the k-th
             // neighbor, the cell cannot contain a better neighbor.
             if best_len == k && cdist >= best[k - 1].0 {
