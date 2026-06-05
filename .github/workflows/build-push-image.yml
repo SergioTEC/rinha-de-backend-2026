@@ -211,17 +211,25 @@ jobs:
             fi
           done
           # Remove timeouts
-          grep -v "^-1$" /tmp/latencies.txt | sort -n > /tmp/latencies_clean.txt
-          P50_MS=$(awk -v p=$(awk 'NR==50' /tmp/latencies_clean.txt) 'BEGIN{print int(p*1000)}')
-          P95_MS=$(awk -v p=$(awk 'NR==95' /tmp/latencies_clean.txt) 'BEGIN{print int(p*1000)}')
-          P99_MS=$(awk -v p=$(awk 'NR==99' /tmp/latencies_clean.txt) 'BEGIN{print int(p*1000)}')
+          grep -v "^-1$" /tmp/latencies.txt | sort -n > /tmp/latencies_clean.txt || true
           TIME_OUTS=$(grep -c "^-1$" /tmp/latencies.txt)
           VALID=$(wc -l < /tmp/latencies_clean.txt)
+          # Se não houver dados válidos, não calcular percentis
+          if [ "$VALID" -eq 0 ]; then
+            P50_MS=0; P95_MS=0; P99_MS=0
+          else
+            P50_VAL=$(awk "NR==$(($VALID / 2))" /tmp/latencies_clean.txt || echo "0")
+            P95_VAL=$(awk "NR==$(($VALID * 95 / 100))" /tmp/latencies_clean.txt || echo "0")
+            P99_VAL=$(awk "NR==$(($VALID * 99 / 100))" /tmp/latencies_clean.txt || echo "0")
+            P50_MS=$(awk -v p="$P50_VAL" 'BEGIN{print int(p*1000)}')
+            P95_MS=$(awk -v p="$P95_VAL" 'BEGIN{print int(p*1000)}')
+            P99_MS=$(awk -v p="$P99_VAL" 'BEGIN{print int(p*1000)}')
+          fi
           echo "Latências (ms): p50=$P50_MS  p95=$P95_MS  p99=$P99_MS  [valid=$VALID timeouts=$TIME_OUTS]"
-          if [ "$P99_MS" -gt 50 ]; then
+          if [ "$VALID" -gt 0 ] && [ "$P99_MS" -gt 50 ]; then
             echo "::warning::p99 = ${P99_MS}ms (acima de 50ms, regressão!)"
           fi
-          if [ "$P99_MS" -gt 200 ]; then
+          if [ "$VALID" -gt 0 ] && [ "$P99_MS" -gt 200 ]; then
             echo "::error::p99 = ${P99_MS}ms (acima de 200ms, CORTE no bot!)"
             exit 1
           fi
