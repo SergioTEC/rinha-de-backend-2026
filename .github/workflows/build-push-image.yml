@@ -152,17 +152,26 @@ jobs:
           echo "✓ 5 payloads aleatórios responderam corretamente"
 
           echo ""
-          echo "=== Teste de carga (200 requests) ==="
+          echo "=== Teste de carga (200 requests) com timeout 2s ==="
           HTTP_500=0
+          HTTP_4XX=0
+          HTTP_TIMEOUT=0
           > /tmp/codes.txt
           for batch in $(seq 1 20); do
             for i in $(seq 1 10); do
               (
-                CODE=$(curl -s -X POST http://localhost:9999/fraud-score \
+                # -m 2: timeout de 2s. Se API demorar mais, curl retorna exit code 28.
+                # Isso detecta regressões de performance (p99 > 2s causaria corte no bot).
+                CODE=$(curl -s -m 2 -X POST http://localhost:9999/fraud-score \
                   -H 'Content-Type: application/json' \
                   -d '{"id":"t","transaction":{"amount":100,"installments":1,"requested_at":"2026-01-01T12:00:00Z"},"customer":{"avg_amount":100,"tx_count_24h":10,"known_merchants":[]},"merchant":{"id":"m","mcc":"5411","avg_amount":100},"terminal":{"is_online":false,"card_present":true,"km_from_home":5},"last_transaction":{"timestamp":"2025-12-31T10:00:00Z","km_from_current":5}}' \
                   -o /dev/null -w "%{http_code}" 2>&1)
-                echo "$CODE" >> /tmp/codes.txt
+                RC=$?
+                if [ $RC -eq 28 ]; then
+                  echo "TIMEOUT" >> /tmp/codes.txt
+                else
+                  echo "$CODE" >> /tmp/codes.txt
+                fi
               ) &
             done
             wait
@@ -170,27 +179,127 @@ jobs:
           TOTAL=$(wc -l < /tmp/codes.txt)
           HTTP_500=$(grep -c "^5" /tmp/codes.txt 2>/dev/null | head -1)
           HTTP_500=${HTTP_500:-0}
-          echo "Total: $TOTAL, HTTP 5xx: $HTTP_500"
+          HTTP_4XX=$(grep -c "^4" /tmp/codes.txt 2>/dev/null | head -1)
+          HTTP_4XX=${HTTP_4XX:-0}
+          HTTP_TIMEOUT=$(grep -c "TIMEOUT" /tmp/codes.txt 2>/dev/null | head -1)
+          HTTP_TIMEOUT=${HTTP_TIMEOUT:-0}
+          echo "Total: $TOTAL, HTTP 5xx: $HTTP_500, HTTP 4xx: $HTTP_4XX, Timeouts(>2s): $HTTP_TIMEOUT"
           if [ "$HTTP_500" -gt 10 ]; then
             echo "FALHOU: $HTTP_500 erros 5xx em $TOTAL (5%+)"
             docker compose logs
             exit 1
           fi
+          if [ "$HTTP_TIMEOUT" -gt 5 ]; then
+            echo "::error::$HTTP_TIMEOUT timeouts (>2s) em $TOTAL (2.5%+) — API muito lenta!"
+            docker compose logs
+            exit 1
+          fi
+          if [ "$HTTP_4XX" -gt 0 ]; then
+            echo "::warning::$HTTP_4XX erros 4xx — API começou a rejeitar requests (regressão!)"
+          fi
 
           echo ""
-          echo "=== Medir p99 (200 sequenciais) ==="
+          echo "=== Medir p99 (200 sequenciais) com timeout 2s ==="
+          > /tmp/latencies.txt
           for i in $(seq 1 200); do
-            curl -s -X POST http://localhost:9999/fraud-score \
+            # -m 2: timeout. Se > 2s, registra como -1 (timeout) e não conta pro p99.
+            T=$(curl -s -m 2 -X POST http://localhost:9999/fraud-score \
               -H 'Content-Type: application/json' \
               -d '{"id":"t","transaction":{"amount":100,"installments":1,"requested_at":"2026-01-01T12:00:00Z"},"customer":{"avg_amount":100,"tx_count_24h":10,"known_merchants":[]},"merchant":{"id":"m","mcc":"5411","avg_amount":100},"terminal":{"is_online":false,"card_present":true,"km_from_home":5},"last_transaction":{"timestamp":"2025-12-31T10:00:00Z","km_from_current":5}}' \
-              -o /dev/null -w "%{time_total}\n" 2>&1
-          done | sort -n > /tmp/latencies.txt
-          P50_MS=$(awk -v p=$(awk 'NR==100' /tmp/latencies.txt) 'BEGIN{print int(p*1000)}')
-          P95_MS=$(awk -v p=$(awk 'NR==190' /tmp/latencies.txt) 'BEGIN{print int(p*1000)}')
-          P99_MS=$(awk -v p=$(awk 'NR==198' /tmp/latencies.txt) 'BEGIN{print int(p*1000)}')
-          echo "Latências (ms): p50=$P50_MS  p95=$P95_MS  p99=$P99_MS"
+              -o /dev/null -w "%{time_total}" 2>&1)
+            if [ -n "$T" ]; then
+              echo "$T" >> /tmp/latencies.txt
+            else
+              echo "-1" >> /tmp/latencies.txt
+            fi
+          done
+          # Remove timeouts
+          grep -v "^-1$" /tmp/latencies.txt | sort -n > /tmp/latencies_clean.txt
+          P50_MS=$(awk -v p=$(awk 'NR==50' /tmp/latencies_clean.txt) 'BEGIN{print int(p*1000)}')
+          P95_MS=$(awk -v p=$(awk 'NR==95' /tmp/latencies_clean.txt) 'BEGIN{print int(p*1000)}')
+          P99_MS=$(awk -v p=$(awk 'NR==99' /tmp/latencies_clean.txt) 'BEGIN{print int(p*1000)}')
+          TIME_OUTS=$(grep -c "^-1$" /tmp/latencies.txt)
+          VALID=$(wc -l < /tmp/latencies_clean.txt)
+          echo "Latências (ms): p50=$P50_MS  p95=$P95_MS  p99=$P99_MS  [valid=$VALID timeouts=$TIME_OUTS]"
           if [ "$P99_MS" -gt 50 ]; then
-            echo "::warning::p99 = ${P99_MS}ms (acima de 50ms)"
+            echo "::warning::p99 = ${P99_MS}ms (acima de 50ms, regressão!)"
+          fi
+          if [ "$P99_MS" -gt 200 ]; then
+            echo "::error::p99 = ${P99_MS}ms (acima de 200ms, CORTE no bot!)"
+            exit 1
+          fi
+          if [ "$TIME_OUTS" -gt 5 ]; then
+            echo "::error::$TIME_OUTS timeouts (>2s) em 200 (2.5%+) — performance muito degradada"
+            exit 1
+          fi
+
+          echo ""
+          echo "=== Teste de carga SUSTENTADA 30s @ ~50 RPS (simula 2 min @ 900 RPS em escala) ==="
+          echo "Detecta: race conditions, memory leaks, flakiness, saturation effects"
+          > /tmp/sust_codes.txt
+          END_TS=$(( $(date +%s) + 30 ))
+          REQ_COUNT=0
+          ERR_COUNT=0
+          while [ $(date +%s) -lt $END_TS ]; do
+            RESP=$(curl -s -m 2 -X POST http://localhost:9999/fraud-score \
+              -H 'Content-Type: application/json' \
+              -d '{"id":"t","transaction":{"amount":100,"installments":1,"requested_at":"2026-01-01T12:00:00Z"},"customer":{"avg_amount":100,"tx_count_24h":10,"known_merchants":[]},"merchant":{"id":"m","mcc":"5411","avg_amount":100},"terminal":{"is_online":false,"card_present":true,"km_from_home":5},"last_transaction":{"timestamp":"2025-12-31T10:00:00Z","km_from_current":5}}' \
+              -o /dev/null -w "%{http_code}" 2>&1)
+            REQ_COUNT=$((REQ_COUNT + 1))
+            # Timeouts (curl exit 28) aparecem como "000" no http_code
+            if [ "${RESP:0:3}" = "000" ]; then
+              ERR_COUNT=$((ERR_COUNT + 1))
+            elif [ "${RESP:0:1}" = "5" ]; then
+              ERR_COUNT=$((ERR_COUNT + 1))
+            fi
+            # Throttle to ~50 RPS
+            sleep 0.02
+          done
+          echo "Sustained: $REQ_COUNT requests em 30s, $ERR_COUNT timeouts/erros 5xx"
+          if [ "$ERR_COUNT" -gt "$((REQ_COUNT / 20))" ]; then
+            echo "::error::$ERR_COUNT erros em $REQ_COUNT (>5%) — degradação severa"
+            docker compose logs
+            exit 1
+          fi
+          if [ "$REQ_COUNT" -lt 1000 ]; then
+            echo "::warning::Só $REQ_COUNT requests em 30s (< 33 RPS, throttled)"
+          fi
+
+          echo ""
+          echo "=== Re-validar detecção após carga sustentada (não regrediu?) ==="
+          RESP=$(curl -s -X POST http://localhost:9999/fraud-score \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "id": "tx-1329056812",
+              "transaction": {"amount": 41.12, "installments": 2, "requested_at": "2026-03-11T18:45:53Z"},
+              "customer": {"avg_amount": 82.24, "tx_count_24h": 3, "known_merchants": ["MERC-003", "MERC-016"]},
+              "merchant": {"id": "MERC-016", "mcc": "5411", "avg_amount": 60.25},
+              "terminal": {"is_online": false, "card_present": true, "km_from_home": 29.2331036248},
+              "last_transaction": null
+            }')
+          if echo "$RESP" | grep -q '"approved":true'; then
+            echo "✓ Legit ainda aprovado após carga sustentada"
+          else
+            echo "::error::Legit NÃO aprovado após carga (regressão!): $RESP"
+            docker compose logs
+            exit 1
+          fi
+          RESP=$(curl -s -X POST http://localhost:9999/fraud-score \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "id": "tx-3330991687",
+              "transaction": {"amount": 9505.97, "installments": 10, "requested_at": "2026-03-14T05:15:12Z"},
+              "customer": {"avg_amount": 81.28, "tx_count_24h": 20, "known_merchants": ["MERC-008", "MERC-007", "MERC-005"]},
+              "merchant": {"id": "MERC-068", "mcc": "7802", "avg_amount": 54.86},
+              "terminal": {"is_online": false, "card_present": true, "km_from_home": 952.2745933273},
+              "last_transaction": null
+            }')
+          if echo "$RESP" | grep -q '"approved":false'; then
+            echo "✓ Fraude ainda detectada após carga sustentada"
+          else
+            echo "::error::Fraude NÃO detectada após carga (regressão!): $RESP"
+            docker compose logs
+            exit 1
           fi
 
           echo ""
