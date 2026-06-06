@@ -5,11 +5,11 @@ use crate::dataset::{Dataset, DIMS};
 
 pub const IVF_NPROBE_EASY: usize = 1;
 pub const IVF_NPROBE_HARD: usize = 8;
-pub const IVF_NPROBE_REPAIR: usize = 12;  // Expanded probe when result is ambiguous (1-4)
-pub const IVF_NPARTITIONS: usize = 16;     // Number of partition keys (2^4 bits)
+pub const IVF_NPROBE_REPAIR: usize = 48;  // Expanded probe when result is ambiguous (1-4)
 /// Early stopping threshold: if the k-th neighbor distance is below this,
 /// we've found "good enough" neighbors — no need to scan more cells.
 pub const IVF_EARLY_DISTANCE_LIMIT: i64 = 200_000;
+pub const IVF_NPARTITIONS: usize = 16;     // Number of partition keys (2^4 bits)
 
 /// Compute partition key from a quantized query.
 /// Uses 4 features that are stable across different fraud patterns:
@@ -167,9 +167,9 @@ impl IVFIndex {
         // changing the actual centroid distance used for lower-bound checks.
         let qkey = partition_key(query) as usize;
         let pcount = self.part_count[qkey] as usize;
-        let mut is_in_partition: [bool; 12] = [false; 12];
-        let mut cells: [(i64, usize); 12] = [(i64::MAX, 0); 12];  // (boosted_dist, cell_idx)
-        let mut real_dist: [i64; 12] = [i64::MAX; 12];            // actual centroid distance
+        let mut is_in_partition: [bool; 48] = [false; 48];
+        let mut cells: [(i64, usize); 48] = [(i64::MAX, 0); 48];  // (boosted_dist, cell_idx)
+        let mut real_dist: [i64; 48] = [i64::MAX; 48];            // actual centroid distance
 
         for c in 0..ds.num_cells {
             let rdist = distance_i16(query, &ds.centroids[c]);
@@ -181,10 +181,11 @@ impl IVFIndex {
                 }
             }
             // Boosted distance for sorting: partition-matched cells get -1.
-            let sdist = if in_partition { rdist.saturating_sub(1) } else { rdist };
+            let mut dist = if in_partition { rdist.saturating_sub(1) } else { rdist };
+            let sdist = dist;
 
-            // Simple linear insert: only 12 cells to track, so O(n^2) is fine.
-            let effective = 12.min(nprobe).min(ds.num_cells);
+            // Simple linear insert: track up to 48 nearest cells, so O(n*48) is fine.
+            let effective = 48.min(nprobe).min(ds.num_cells);
             let mut insert_idx = effective;
             for i in 0..effective {
                 if sdist < cells[i].0 {
@@ -204,7 +205,7 @@ impl IVFIndex {
             }
         }
         let nearest_cells = cells;
-        let effective_nprobe = nprobe.min(ds.num_cells).min(12);
+        let effective_nprobe = nprobe.min(ds.num_cells).min(48);
 
         let mut best: [(i64, u8); 5] = [(i64::MAX, 0); 5]; // (dist, label)
         let mut best_len: usize = 0;
