@@ -302,7 +302,7 @@ pub fn quantize(v: f32) -> i16 {
 // Link C AVX2 distance function when compiled with has_c_avx2
 #[cfg(has_c_avx2)]
 extern "C" {
-    fn l2sq_int16_avx2(a: *const i16, b: *const i16) -> i32;
+    fn l2sq_int16_avx2(a: *const i16, b: *const i16) -> i64;
 }
 
 #[cfg(test)]

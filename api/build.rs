@@ -32,10 +32,19 @@ fn main() {
             .flag("-mavx2")
             .flag("-mfma")
             .flag("-O3");
+        // cc::Build::compile emits the static lib and prints the
+        // cargo:rustc-link-* directives for us. Keep them.
         build.compile("distance_avx2");
-        
-        println!("cargo:rustc-link-lib=static=distance_avx2");
-        println!("cargo:rustc-link-search=native={}", out_dir);
+
+        // The cargo-zigbuild linker doesn't always pick up the auto-emitted
+        // cargo:rustc-link-lib=static directives, so we pass the static
+        // lib path directly as a link argument.
+        let lib_path = std::path::Path::new(&out_dir).join("libdistance_avx2.a");
+        println!("cargo:rustc-link-arg=-Wl,--whole-archive");
+        println!("cargo:rustc-link-arg={}", lib_path.display());
+        println!("cargo:rustc-link-arg=-Wl,--no-whole-archive");
+
+        // Tell the rest of the build that C AVX2 is available.
         println!("cargo:rustc-cfg=has_c_avx2");
         println!("cargo:warning=C AVX2 distance compiled successfully");
     }
