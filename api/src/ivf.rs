@@ -127,7 +127,7 @@ impl IVFIndex {
         // Risky pattern detection: certain top-5 fraud arrangements with a
         // small centroid gap indicate the binary decision (approved: true|false)
         // is sensitive to which neighbours are picked.
-        if is_risky_pattern(bits, centroid_probe, centroid_next) {
+        if is_risky_pattern(nprobe, bits, centroid_probe, centroid_next) {
             // Re-scan with expanded nprobe
             self.search_phase(ds, query, k, nprobe_expanded)
         } else {
@@ -298,19 +298,44 @@ impl IVFIndex {
 /// to which neighbours are picked. In those cases we expand the IVF probe to
 /// gather more candidates.
 ///
-/// The threshold values were tuned by bmtec on a Xeon host; the pattern matches
-/// 7 specific bit patterns observed in real fraud queries.
+/// Threshold values are tuned per `nprobe`:
+///   - nprobe=10: 7 patterns with hand-tuned thresholds
+///   - nprobe=12: 6 patterns with larger thresholds (more cells, larger gap OK)
 #[inline]
-fn is_risky_pattern(bits: u8, centroid_probe: i64, centroid_next: i64) -> bool {
+fn is_risky_pattern(nprobe: usize, bits: u8, centroid_probe: i64, centroid_next: i64) -> bool {
     let centroid_gap = if centroid_next == i64::MAX {
         i64::MAX
     } else {
         centroid_next - centroid_probe
     };
 
+    if nprobe == 10 {
+        return match bits {
+            0b00110 => centroid_gap <= 500_000,
+            0b01010 => centroid_gap <= 500_000,
+            0b01100 => centroid_gap <= 600_000,
+            0b10010 => centroid_gap <= 1_200_000,
+            0b10011 => centroid_gap <= 500_000,
+            0b10110 => centroid_gap <= 700_000,
+            0b11100 => centroid_gap <= 150_000,
+            _ => false,
+        };
+    }
+
+    if nprobe == 12 {
+        return match bits {
+            0b00110 => centroid_gap <= 1_600_000,
+            0b01010 => centroid_gap <= 3_800_000,
+            0b01100 => centroid_gap <= 1_000_000,
+            0b10010 => centroid_gap <= 1_800_000,
+            0b10011 => centroid_gap <= 500_000,
+            0b11100 => centroid_gap <= 150_000,
+            _ => false,
+        };
+    }
+
+    // For other nprobe values, fall back to nprobe=10 thresholds.
     match bits {
-        // 3-of-5 arrangements where the binary decision could flip if a
-        // closer neighbour is found in the next probe batch.
         0b00110 => centroid_gap <= 500_000,
         0b01010 => centroid_gap <= 500_000,
         0b01100 => centroid_gap <= 600_000,
