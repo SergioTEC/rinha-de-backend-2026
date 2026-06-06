@@ -26,8 +26,6 @@ COPY native api/native
 COPY resources /app/resources
 
 # Build the API in release mode for x86_64 linux
-# Skip C AVX2 on cross-build (QEMU); native x86_64 auto-detects
-ENV RINHA_SKIP_C_AVX2=1
 RUN cargo build --target x86_64-unknown-linux-gnu --release -p rinha-api
 
 # Runtime stage: minimal Debian image
