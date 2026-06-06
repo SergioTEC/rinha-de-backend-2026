@@ -10,7 +10,7 @@ use rayon::prelude::*;
 
 const DIMS: usize = 14;
 const NUM_CELLS: usize = 1024;
-const KMEANS_ITERATIONS: usize = 3;
+const KMEANS_ITERATIONS: usize = 10;
 const QSCALE: f32 = 10000.0;
 
 fn main() {
